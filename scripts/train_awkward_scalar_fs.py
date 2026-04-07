@@ -139,8 +139,11 @@ def build_model(args, tokenizer):
             trainable.append(name)
     else:
         if args.disable_future_seed:
-            raise ValueError("disable-future-seed requires --unfreeze-backbone, otherwise no parameters are trainable")
-        trainable = freeze_except_future_seed(model)
+            for _name, param in model.named_parameters():
+                param.requires_grad = False
+            trainable = []
+        else:
+            trainable = freeze_except_future_seed(model)
 
     return model, fs_cfg, trainable
 
@@ -223,21 +226,24 @@ def main() -> None:
         batches = cycle(loader)
 
         params = [p for p in model.parameters() if p.requires_grad]
-        optimizer = torch.optim.AdamW(params, lr=args.lr)
+        optimizer = torch.optim.AdamW(params, lr=args.lr) if params else None
 
         losses = []
         train_runtime = None
         model.train()
-        for _step in range(args.max_steps):
-            batch = next(batches)
-            batch = {k: v.to(device) for k, v in batch.items()}
-            out = model(**batch, use_cache=False)
-            loss = out.loss
-            train_runtime = get_future_seed_runtime_stats(model)
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-            losses.append(float(loss.item()))
+        effective_steps = 0
+        if optimizer is not None and args.max_steps > 0:
+            for _step in range(args.max_steps):
+                batch = next(batches)
+                batch = {k: v.to(device) for k, v in batch.items()}
+                out = model(**batch, use_cache=False)
+                loss = out.loss
+                train_runtime = get_future_seed_runtime_stats(model)
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+                losses.append(float(loss.item()))
+                effective_steps += 1
 
         eval_limit = args.eval_limit if args.eval_limit > 0 else None
         awkward_metrics = evaluate(model, tokenizer, valid_awkward.rows, device, args.max_length, eval_limit)
@@ -258,11 +264,12 @@ def main() -> None:
             "future_seed_enabled": not args.disable_future_seed,
             "unfreeze_backbone": args.unfreeze_backbone,
             "train_steps": args.max_steps,
+            "effective_train_steps": effective_steps,
             "batch_size": args.batch_size,
             "learning_rate": args.lr,
-            "loss_start": losses[0],
-            "loss_end": losses[-1],
-            "loss_min": min(losses),
+            "loss_start": losses[0] if losses else None,
+            "loss_end": losses[-1] if losses else None,
+            "loss_min": min(losses) if losses else None,
             "trainable_parameter_count": sum(p.numel() for p in model.parameters() if p.requires_grad),
             "future_seed_parameters": list_future_seed_parameters(model),
             "trainable_parameters_preview": trainable[:20],
