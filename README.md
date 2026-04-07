@@ -10,6 +10,7 @@ Current scope:
 - detached + RMS-normalized + clipped recurrent seed
 - smoke run on a tiny randomly initialized `qwen3_5` model
 - awkward-task tiny SFT smoke with `baseline` vs `scalar-FS` switches
+- pretrained `Qwen3.5-0.8B` remote smoke on GPU with repo-root caches only
 
 The first goal is not end-task quality. It is to verify that:
 
@@ -66,6 +67,13 @@ DOWNLOAD_MODE=probe GENERATE_DATASET=awkward-kv bash ./down.sh
 RUN_MODE=train-smoke FS_MODE=disabled bash ./run.sh
 ```
 
+Run the matching pretrained control on a GPU machine without training any parameters:
+
+```bash
+DOWNLOAD_MODE=probe GENERATE_DATASET=awkward-kv bash ./down.sh
+RUN_MODE=train-pretrained FS_MODE=disabled LOAD_DTYPE=bfloat16 LOW_CPU_MEM_USAGE=1 EVAL_LIMIT=8 MAX_STEPS=1 BATCH_SIZE=1 bash ./run.sh
+```
+
 ## Current Status
 
 - `qwen3_5` tiny smoke is passing and confirms cross-layer seed injection on selected DeltaNet layers.
@@ -75,6 +83,18 @@ RUN_MODE=train-smoke FS_MODE=disabled bash ./run.sh
   - scalar-FS clean run: `runs/qwen35-train-smoke-clean-20260407T071851Z`
 - At this stage both tiny runs land at the same exact-match (`0.0625` awkward / `0.0625` friendly). This is still a pipeline validation result, not a task-improvement claim.
 - Low-memory pretrained loading flags are now wired in (`LOAD_DTYPE`, `LOW_CPU_MEM_USAGE`, `EVAL_LIMIT`), but a local `Qwen/Qwen3.5-0.8B` forward on this 16GB CPU machine still exited with `137`. Real pretrained runs should be moved to a higher-memory or GPU machine.
+- Remote GPU runs now succeed end-to-end on `Qwen/Qwen3.5-0.8B`:
+  - pretrained validate with scalar-FS: `runs/qwen35-0p8b-validate-pretrained-bf16-remote-rerun2-20260407T124255Z`
+  - 1-step pretrained smoke with scalar-FS: `runs/qwen35-0p8b-train-pretrained-smoke-rerun2-20260407T124305Z`
+  - frozen disabled control: `runs/qwen35-0p8b-train-pretrained-baseline-control-rerun3-20260407T125253Z`
+- The remote scalar-FS run confirms real cross-layer seed activity on pretrained weights:
+  - `device = cuda`
+  - `train_runtime.injection_count = 11`
+  - `trainable_parameter_count = 17`
+- The current blocker is checkpoint/model mismatch, not pipeline breakage:
+  - both scalar-FS and frozen disabled control land at `0.0` exact-match on the small awkward/friendly eval splits
+  - loading reports show repeated `UNEXPECTED` and `MISSING` weights between the downloaded `0.8B` checkpoint and the current `transformers` `qwen3_5` module layout
+  - this means the present `0.8B` run should be treated as a pretrained smoke, not as a meaningful quality comparison yet
 
 ## Notes
 
@@ -83,3 +103,4 @@ RUN_MODE=train-smoke FS_MODE=disabled bash ./run.sh
 - The repo now includes a local compatibility patch for the current `transformers main` `qwen3_5` constructor bugs, so tiny-model smoke can run directly on `qwen3_5`.
 - Full `Qwen3.5-9B-Base` pretrained validation is supported, but it depends on downloading the full checkpoint and is expected to be run on a machine with enough RAM or GPU memory.
 - Repo scripts now pin `uv`, Hugging Face, transformers, tokenizers, torch, and pip caches to `artifacts/cache/` so no runtime cache should land under `~`.
+- The remote aistation workflow should always keep tools, caches, model weights, and datasets under `/fangxueji/Projects/PG/future-seed-finetune`.
