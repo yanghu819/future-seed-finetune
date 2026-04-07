@@ -21,6 +21,16 @@ from future_seed_finetune import (
     list_future_seed_parameters,
 )
 
+def resolve_dtype(name: str) -> torch.dtype:
+    mapping = {
+        "float32": torch.float32,
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+    }
+    if name not in mapping:
+        raise ValueError(f"unsupported dtype={name}")
+    return mapping[name]
+
 
 class JsonlDataset(Dataset):
     def __init__(self, path: Path):
@@ -89,10 +99,12 @@ def build_model(args, tokenizer):
         config.mlp_only_layers = []
         model = Qwen3_5ForCausalLM(config)
     else:
+        load_dtype = resolve_dtype(args.load_dtype)
         model = Qwen3_5ForCausalLM.from_pretrained(
             args.model_dir,
-            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+            torch_dtype=load_dtype,
             device_map=None,
+            low_cpu_mem_usage=args.low_cpu_mem_usage,
         )
         config = model.config
         mlp_only_layers = getattr(config, "mlp_only_layers", None)
@@ -128,10 +140,11 @@ def build_model(args, tokenizer):
     return model, fs_cfg, trainable
 
 
-def evaluate(model, tokenizer, rows, device, max_length: int) -> dict[str, float]:
+def evaluate(model, tokenizer, rows, device, max_length: int, limit: int | None = None) -> dict[str, float]:
     model.eval()
     correct = 0
-    for row in rows:
+    eval_rows = rows[:limit] if limit is not None and limit > 0 else rows
+    for row in eval_rows:
         encoded = tokenizer(row["prompt"], return_tensors="pt", add_special_tokens=False)
         encoded = {k: v[:, :max_length].to(device) for k, v in encoded.items()}
         with torch.no_grad():
@@ -148,7 +161,7 @@ def evaluate(model, tokenizer, rows, device, max_length: int) -> dict[str, float
         match = re.search(r"\d", decoded)
         pred = match.group(0) if match else ""
         correct += int(pred == row["target"])
-    return {"exact_match": correct / max(1, len(rows))}
+    return {"exact_match": correct / max(1, len(eval_rows)), "num_examples": len(eval_rows)}
 
 
 def main() -> None:
@@ -166,6 +179,9 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--unfreeze-backbone", action="store_true")
     parser.add_argument("--disable-future-seed", action="store_true")
+    parser.add_argument("--load-dtype", choices=["float32", "bfloat16", "float16"], default="float32")
+    parser.add_argument("--low-cpu-mem-usage", action="store_true")
+    parser.add_argument("--eval-limit", type=int, default=0)
     parser.add_argument("--tiny-hidden-size", type=int, default=32)
     parser.add_argument("--tiny-intermediate-size", type=int, default=64)
     parser.add_argument("--tiny-num-layers", type=int, default=4)
@@ -217,8 +233,9 @@ def main() -> None:
             optimizer.zero_grad()
             losses.append(float(loss.item()))
 
-        awkward_metrics = evaluate(model, tokenizer, valid_awkward.rows, device, args.max_length)
-        friendly_metrics = evaluate(model, tokenizer, valid_friendly.rows, device, args.max_length)
+        eval_limit = args.eval_limit if args.eval_limit > 0 else None
+        awkward_metrics = evaluate(model, tokenizer, valid_awkward.rows, device, args.max_length, eval_limit)
+        friendly_metrics = evaluate(model, tokenizer, valid_friendly.rows, device, args.max_length, eval_limit)
         eval_runtime = get_future_seed_runtime_stats(model)
 
         output_dir = Path(args.output_dir)
@@ -249,6 +266,9 @@ def main() -> None:
             "eval_awkward": awkward_metrics,
             "eval_friendly": friendly_metrics,
             "device": str(device),
+            "load_dtype": args.load_dtype if args.model_backend == "pretrained" else None,
+            "low_cpu_mem_usage": bool(args.low_cpu_mem_usage) if args.model_backend == "pretrained" else None,
+            "eval_limit": args.eval_limit,
         }
     print(json.dumps(result, indent=2, sort_keys=True))
 

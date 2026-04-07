@@ -88,6 +88,9 @@ PY
 set +e
 MODEL_DIR="${MODEL_DIR:-${ROOT_DIR}/artifacts/models/qwen3_5_9b_base_probe}"
 DATASET_DIR="${DATASET_DIR:-${ROOT_DIR}/artifacts/datasets/awkward_kv}"
+LOAD_DTYPE="${LOAD_DTYPE:-float32}"
+LOW_CPU_MEM_USAGE="${LOW_CPU_MEM_USAGE:-0}"
+EVAL_LIMIT="${EVAL_LIMIT:-0}"
 
 if [[ "${RUN_MODE}" == "smoke" ]]; then
   export ENTRYPOINT
@@ -96,6 +99,14 @@ if [[ "${RUN_MODE}" == "smoke" ]]; then
 elif [[ "${RUN_MODE}" == "validate-config" ]]; then
   export ENTRYPOINT MODEL_DIR
   uv run python "${ENTRYPOINT}" --model-dir "${MODEL_DIR}" > "${RESULT_FILE}" 2> "${ERROR_LOG}"
+  EXIT_CODE=$?
+elif [[ "${RUN_MODE}" == "validate-pretrained" ]]; then
+  export ENTRYPOINT MODEL_DIR
+  VALIDATE_CMD=(uv run python "${ENTRYPOINT}" --model-dir "${MODEL_DIR}" --from-pretrained --load-dtype "${LOAD_DTYPE}")
+  if [[ "${LOW_CPU_MEM_USAGE}" == "1" ]]; then
+    VALIDATE_CMD+=(--low-cpu-mem-usage)
+  fi
+  "${VALIDATE_CMD[@]}" > "${RESULT_FILE}" 2> "${ERROR_LOG}"
   EXIT_CODE=$?
 elif [[ "${RUN_MODE}" == "train-smoke" ]]; then
   export ENTRYPOINT MODEL_DIR DATASET_DIR
@@ -124,9 +135,14 @@ elif [[ "${RUN_MODE}" == "train-pretrained" ]]; then
     --output-dir "${RUN_DIR}/outputs" \
     --max-steps "${MAX_STEPS:-100}" \
     --batch-size "${BATCH_SIZE:-1}" \
-    --lr "${LR:-1e-4}")
+    --lr "${LR:-1e-4}" \
+    --load-dtype "${LOAD_DTYPE}" \
+    --eval-limit "${EVAL_LIMIT}")
   if [[ "${UNFREEZE_BACKBONE:-0}" == "1" ]]; then
     TRAIN_CMD+=(--unfreeze-backbone)
+  fi
+  if [[ "${LOW_CPU_MEM_USAGE}" == "1" ]]; then
+    TRAIN_CMD+=(--low-cpu-mem-usage)
   fi
   if [[ "${FS_MODE}" == "disabled" ]]; then
     TRAIN_CMD+=(--disable-future-seed)

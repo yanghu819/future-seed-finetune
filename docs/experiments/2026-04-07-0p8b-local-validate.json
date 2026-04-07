@@ -1,0 +1,24 @@
+{
+  "date": "2026-04-07",
+  "experiment": "qwen3.5-0.8b-local-validate",
+  "machine": "local-16gb-cpu",
+  "model_id": "Qwen/Qwen3.5-0.8B",
+  "model_dir": "artifacts/models/qwen3_5_0p8b_full",
+  "runs": [
+    {
+      "experiment_name": "qwen35-0p8b-validate-pretrained",
+      "run_dir": "runs/qwen35-0p8b-validate-pretrained-20260407T075006Z",
+      "load_dtype": "float32",
+      "low_cpu_mem_usage": false,
+      "exit_status": 137
+    },
+    {
+      "experiment_name": "qwen35-0p8b-validate-pretrained-bf16",
+      "run_dir": "runs/qwen35-0p8b-validate-pretrained-bf16-20260407T075322Z",
+      "load_dtype": "bfloat16",
+      "low_cpu_mem_usage": true,
+      "exit_status": 137
+    }
+  ],
+  "conclusion": "Low-memory loading path is implemented, but real pretrained forward still exceeds what this local 16GB CPU machine can sustain."
+}

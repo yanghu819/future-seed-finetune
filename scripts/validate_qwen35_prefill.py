@@ -18,12 +18,24 @@ from future_seed_finetune import (
     list_future_seed_parameters,
 )
 
+def resolve_dtype(name: str) -> torch.dtype:
+    mapping = {
+        "float32": torch.float32,
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+    }
+    if name not in mapping:
+        raise ValueError(f"unsupported dtype={name}")
+    return mapping[name]
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-dir", required=True)
     parser.add_argument("--prompt", default="Future Seed shifts recurrent state across deep Gated DeltaNet layers.")
     parser.add_argument("--from-pretrained", action="store_true")
+    parser.add_argument("--load-dtype", choices=["float32", "bfloat16", "float16"], default="float32")
+    parser.add_argument("--low-cpu-mem-usage", action="store_true")
     args = parser.parse_args()
 
     with contextlib.redirect_stdout(sys.stderr):
@@ -44,11 +56,13 @@ def main() -> None:
         config.mlp_only_layers = list(mlp_only_layers)
 
     if args.from_pretrained:
+        load_dtype = resolve_dtype(args.load_dtype)
         model = Qwen3_5ForCausalLM.from_pretrained(
             model_dir,
             config=config,
-            torch_dtype=torch.float32,
+            torch_dtype=load_dtype,
             device_map=None,
+            low_cpu_mem_usage=args.low_cpu_mem_usage,
         )
         run_forward = True
     else:
@@ -90,6 +104,8 @@ def main() -> None:
         "vocab_size": int(config.vocab_size),
         "num_hidden_layers": int(config.num_hidden_layers),
         "prompt_tokens": int(encoded["input_ids"].shape[1]),
+        "load_dtype": args.load_dtype if args.from_pretrained else None,
+        "low_cpu_mem_usage": bool(args.low_cpu_mem_usage) if args.from_pretrained else None,
     }
     print(json.dumps(result, indent=2, sort_keys=True))
 

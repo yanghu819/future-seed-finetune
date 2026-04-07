@@ -73,6 +73,7 @@ RUN_MODE=train-smoke FS_MODE=disabled bash ./run.sh
   - baseline clean run: `runs/qwen35-train-smoke-baseline-clean-20260407T071851Z`
   - scalar-FS clean run: `runs/qwen35-train-smoke-clean-20260407T071851Z`
 - At this stage both tiny runs land at the same exact-match (`0.0625` awkward / `0.0625` friendly). This is still a pipeline validation result, not a task-improvement claim.
+- Low-memory pretrained loading flags are now wired in (`LOAD_DTYPE`, `LOW_CPU_MEM_USAGE`, `EVAL_LIMIT`), but a local `Qwen/Qwen3.5-0.8B` forward on this 16GB CPU machine still exited with `137`. Real pretrained runs should be moved to a higher-memory or GPU machine.
 
 ## Notes
 
