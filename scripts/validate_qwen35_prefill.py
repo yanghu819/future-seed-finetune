@@ -52,14 +52,20 @@ def main() -> None:
 
     if args.from_pretrained:
         load_dtype = resolve_dtype(args.load_dtype)
+        pretrained_kwargs = {
+            "config": config,
+            "torch_dtype": load_dtype,
+            "device_map": None,
+            "low_cpu_mem_usage": args.low_cpu_mem_usage,
+        }
+        if device.type == "cuda":
+            pretrained_kwargs["device_map"] = {"": torch.cuda.current_device()}
         model = Qwen3_5ForCausalLM.from_pretrained(
             model_dir,
-            config=config,
-            torch_dtype=load_dtype,
-            device_map=None,
-            low_cpu_mem_usage=args.low_cpu_mem_usage,
+            **pretrained_kwargs,
         )
-        model.to(device)
+        if pretrained_kwargs["device_map"] is None:
+            model.to(device)
         run_forward = True
     else:
         with init_empty_weights():

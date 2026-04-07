@@ -77,6 +77,7 @@ def build_model(args, tokenizer):
     install_qwen35_upstream_compat_fixes()
     with contextlib.redirect_stdout(sys.stderr):
         from transformers.models.qwen3_5.modular_qwen3_5 import Qwen3_5ForCausalLM, Qwen3_5TextConfig
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if args.model_backend == "tiny":
         config = Qwen3_5TextConfig(
@@ -102,14 +103,20 @@ def build_model(args, tokenizer):
     else:
         load_dtype = resolve_dtype(args.load_dtype)
         config = load_qwen35_text_config(args.model_dir)
+        pretrained_kwargs = {
+            "config": config,
+            "torch_dtype": load_dtype,
+            "device_map": None,
+            "low_cpu_mem_usage": args.low_cpu_mem_usage,
+        }
+        if device.type == "cuda":
+            pretrained_kwargs["device_map"] = {"": torch.cuda.current_device()}
         model = Qwen3_5ForCausalLM.from_pretrained(
             args.model_dir,
-            config=config,
-            torch_dtype=load_dtype,
-            device_map=None,
-            low_cpu_mem_usage=args.low_cpu_mem_usage,
+            **pretrained_kwargs,
         )
         config = model.config
+        model._future_seed_loaded_via_device_map = bool(pretrained_kwargs["device_map"] is not None)
 
     fs_cfg = None
     if not args.disable_future_seed:
@@ -199,7 +206,8 @@ def main() -> None:
             tokenizer.pad_token = tokenizer.eos_token
 
         model, fs_cfg, trainable = build_model(args, tokenizer)
-        model.to(device)
+        if not getattr(model, "_future_seed_loaded_via_device_map", False):
+            model.to(device)
 
         dataset_dir = Path(args.dataset_dir)
         train_set = JsonlDataset(dataset_dir / "train.jsonl")
