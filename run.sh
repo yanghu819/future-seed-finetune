@@ -5,11 +5,24 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${ROOT_DIR}"
 
 RUN_MODE="${RUN_MODE:-smoke}"
+FS_MODE="${FS_MODE:-enabled}"
 EXPERIMENT_NAME_DEFAULT="qwen35-scalar-fs-smoke"
 if [[ "${RUN_MODE}" == "validate-config" ]]; then
   EXPERIMENT_NAME_DEFAULT="qwen35-validate-config"
 elif [[ "${RUN_MODE}" == "validate-pretrained" ]]; then
   EXPERIMENT_NAME_DEFAULT="qwen35-validate-pretrained"
+elif [[ "${RUN_MODE}" == "train-smoke" ]]; then
+  if [[ "${FS_MODE}" == "disabled" ]]; then
+    EXPERIMENT_NAME_DEFAULT="qwen35-train-smoke-baseline"
+  else
+    EXPERIMENT_NAME_DEFAULT="qwen35-train-smoke"
+  fi
+elif [[ "${RUN_MODE}" == "train-pretrained" ]]; then
+  if [[ "${FS_MODE}" == "disabled" ]]; then
+    EXPERIMENT_NAME_DEFAULT="qwen35-train-pretrained-baseline"
+  else
+    EXPERIMENT_NAME_DEFAULT="qwen35-train-pretrained"
+  fi
 fi
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-${EXPERIMENT_NAME_DEFAULT}}"
 RUN_TIMESTAMP="${RUN_TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
@@ -27,6 +40,11 @@ case "${RUN_MODE}" in
     ENTRYPOINT="scripts/validate_qwen35_prefill.py"
     RESULT_FILE="${RESULT_DIR}/validate_metrics.json"
     ERROR_LOG="${LOG_DIR}/validate.stderr.log"
+    ;;
+  train-smoke|train-pretrained)
+    ENTRYPOINT="scripts/train_awkward_scalar_fs.py"
+    RESULT_FILE="${RESULT_DIR}/train_metrics.json"
+    ERROR_LOG="${LOG_DIR}/train.stderr.log"
     ;;
   *)
     echo "Unknown RUN_MODE=${RUN_MODE}" >&2
@@ -69,6 +87,7 @@ PY
 
 set +e
 MODEL_DIR="${MODEL_DIR:-${ROOT_DIR}/artifacts/models/qwen3_5_9b_base_probe}"
+DATASET_DIR="${DATASET_DIR:-${ROOT_DIR}/artifacts/datasets/awkward_kv}"
 
 if [[ "${RUN_MODE}" == "smoke" ]]; then
   export ENTRYPOINT
@@ -77,6 +96,42 @@ if [[ "${RUN_MODE}" == "smoke" ]]; then
 elif [[ "${RUN_MODE}" == "validate-config" ]]; then
   export ENTRYPOINT MODEL_DIR
   uv run python "${ENTRYPOINT}" --model-dir "${MODEL_DIR}" > "${RESULT_FILE}" 2> "${ERROR_LOG}"
+  EXIT_CODE=$?
+elif [[ "${RUN_MODE}" == "train-smoke" ]]; then
+  export ENTRYPOINT MODEL_DIR DATASET_DIR
+  TRAIN_CMD=(uv run python "${ENTRYPOINT}" \
+    --dataset-dir "${DATASET_DIR}" \
+    --model-dir "${MODEL_DIR}" \
+    --model-backend tiny \
+    --output-dir "${RUN_DIR}/outputs" \
+    --max-steps "${MAX_STEPS:-20}" \
+    --batch-size "${BATCH_SIZE:-4}" \
+    --lr "${LR:-5e-4}")
+  if [[ "${UNFREEZE_BACKBONE:-1}" == "1" ]]; then
+    TRAIN_CMD+=(--unfreeze-backbone)
+  fi
+  if [[ "${FS_MODE}" == "disabled" ]]; then
+    TRAIN_CMD+=(--disable-future-seed)
+  fi
+  "${TRAIN_CMD[@]}" > "${RESULT_FILE}" 2> "${ERROR_LOG}"
+  EXIT_CODE=$?
+elif [[ "${RUN_MODE}" == "train-pretrained" ]]; then
+  export ENTRYPOINT MODEL_DIR DATASET_DIR
+  TRAIN_CMD=(uv run python "${ENTRYPOINT}" \
+    --dataset-dir "${DATASET_DIR}" \
+    --model-dir "${MODEL_DIR}" \
+    --model-backend pretrained \
+    --output-dir "${RUN_DIR}/outputs" \
+    --max-steps "${MAX_STEPS:-100}" \
+    --batch-size "${BATCH_SIZE:-1}" \
+    --lr "${LR:-1e-4}")
+  if [[ "${UNFREEZE_BACKBONE:-0}" == "1" ]]; then
+    TRAIN_CMD+=(--unfreeze-backbone)
+  fi
+  if [[ "${FS_MODE}" == "disabled" ]]; then
+    TRAIN_CMD+=(--disable-future-seed)
+  fi
+  "${TRAIN_CMD[@]}" > "${RESULT_FILE}" 2> "${ERROR_LOG}"
   EXIT_CODE=$?
 else
   export ENTRYPOINT MODEL_DIR

@@ -9,6 +9,7 @@ Current scope:
 - deep-layer scalar seed adapter
 - detached + RMS-normalized + clipped recurrent seed
 - smoke run on a tiny randomly initialized `qwen3_5` model
+- awkward-task tiny SFT smoke with `baseline` vs `scalar-FS` switches
 
 The first goal is not end-task quality. It is to verify that:
 
@@ -22,6 +23,8 @@ The first goal is not end-task quality. It is to verify that:
 - `scripts/smoke_qwen35_scalar_fs.py`: tiny random-model smoke
 - `scripts/download_qwen35_probe_assets.py`: download Qwen3.5 probe assets or full weights
 - `scripts/validate_qwen35_prefill.py`: validate real Qwen3.5 config or pretrained checkpoint
+- `scripts/build_awkward_kv_dataset.py`: build a synthetic causally-awkward SFT dataset
+- `scripts/train_awkward_scalar_fs.py`: train tiny or pretrained models on that dataset
 - `setup.sh`: install deps with `uv`
 - `down.sh`: create local artifact/cache layout
 - `run.sh`: run smoke and write metadata/results under `runs/`
@@ -47,6 +50,29 @@ If you already have full weights locally:
 DOWNLOAD_MODE=full bash ./down.sh
 RUN_MODE=validate-pretrained bash ./run.sh
 ```
+
+Run a tiny awkward-task training smoke:
+
+```bash
+DOWNLOAD_MODE=probe GENERATE_DATASET=awkward-kv bash ./down.sh
+RUN_MODE=train-smoke bash ./run.sh
+```
+
+Run the matching tiny baseline without the Future-Seed path:
+
+```bash
+DOWNLOAD_MODE=probe GENERATE_DATASET=awkward-kv bash ./down.sh
+RUN_MODE=train-smoke FS_MODE=disabled bash ./run.sh
+```
+
+## Current Status
+
+- `qwen3_5` tiny smoke is passing and confirms cross-layer seed injection on selected DeltaNet layers.
+- Real `Qwen3.5-9B-Base` config/tokenizer probe is passing.
+- Tiny awkward-task SFT smoke now supports both `baseline` and `scalar-FS`:
+  - baseline clean run: `runs/qwen35-train-smoke-baseline-clean-20260407T071851Z`
+  - scalar-FS clean run: `runs/qwen35-train-smoke-clean-20260407T071851Z`
+- At this stage both tiny runs land at the same exact-match (`0.0625` awkward / `0.0625` friendly). This is still a pipeline validation result, not a task-improvement claim.
 
 ## Notes
 

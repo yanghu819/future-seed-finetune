@@ -1,0 +1,45 @@
+{
+  "date": "2026-04-07",
+  "repo": "future-seed-finetune",
+  "experiment": "awkward-train-smoke",
+  "purpose": "Validate tiny qwen3_5 awkward-task SFT loop with baseline vs scalar-FS.",
+  "runs": {
+    "baseline": {
+      "run_dir": "runs/qwen35-train-smoke-baseline-clean-20260407T071851Z",
+      "exit_status": 0,
+      "model_backend": "tiny",
+      "future_seed_enabled": false,
+      "train_steps": 12,
+      "loss_start": 12.373533248901367,
+      "loss_end": 11.766023635864258,
+      "eval_awkward_exact_match": 0.0625,
+      "eval_friendly_exact_match": 0.0625
+    },
+    "scalar_fs": {
+      "run_dir": "runs/qwen35-train-smoke-clean-20260407T071851Z",
+      "exit_status": 0,
+      "model_backend": "tiny",
+      "future_seed_enabled": true,
+      "train_steps": 12,
+      "loss_start": 12.373551368713379,
+      "loss_end": 11.764974594116211,
+      "eval_awkward_exact_match": 0.0625,
+      "eval_friendly_exact_match": 0.0625,
+      "train_runtime": {
+        "injection_count": 1,
+        "captured_layers": [
+          1,
+          2
+        ],
+        "injected_layers": [
+          2
+        ]
+      },
+      "fs_alpha": {
+        "model.layers.1.linear_attn.fs_alpha": 0.25,
+        "model.layers.2.linear_attn.fs_alpha": 0.2443651258945465
+      }
+    }
+  },
+  "conclusion": "Pipeline validation passed. No task-level improvement observed on this tiny synthetic smoke."
+}

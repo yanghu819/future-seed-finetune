@@ -9,15 +9,21 @@ mkdir -p artifacts cache runs logs
 MODEL_ID="${MODEL_ID:-Qwen/Qwen3.5-9B-Base}"
 DOWNLOAD_MODE="${DOWNLOAD_MODE:-none}"
 MODEL_DIR="${MODEL_DIR:-${ROOT_DIR}/artifacts/models/qwen3_5_9b_base_probe}"
+GENERATE_DATASET="${GENERATE_DATASET:-none}"
+DATASET_DIR="${DATASET_DIR:-${ROOT_DIR}/artifacts/datasets/awkward_kv}"
 
-if [[ "${DOWNLOAD_MODE}" == "none" ]]; then
+if [[ "${DOWNLOAD_MODE}" != "none" ]]; then
+  CMD=(uv run python scripts/download_qwen35_probe_assets.py --model-id "${MODEL_ID}" --output-dir "${MODEL_DIR}")
+  if [[ "${DOWNLOAD_MODE}" == "full" ]]; then
+    CMD+=(--full-weights)
+  fi
+  "${CMD[@]}"
+fi
+
+if [[ "${GENERATE_DATASET}" == "awkward-kv" ]]; then
+  uv run python scripts/build_awkward_kv_dataset.py --output-dir "${DATASET_DIR}"
+fi
+
+if [[ "${DOWNLOAD_MODE}" == "none" && "${GENERATE_DATASET}" == "none" ]]; then
   echo "No external assets required for smoke."
-  exit 0
 fi
-
-CMD=(uv run python scripts/download_qwen35_probe_assets.py --model-id "${MODEL_ID}" --output-dir "${MODEL_DIR}")
-if [[ "${DOWNLOAD_MODE}" == "full" ]]; then
-  CMD+=(--full-weights)
-fi
-
-"${CMD[@]}"
