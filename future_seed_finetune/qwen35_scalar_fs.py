@@ -1,0 +1,325 @@
+from __future__ import annotations
+
+from contextvars import ContextVar
+from dataclasses import asdict, dataclass
+from typing import Any
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+_RUNTIME: ContextVar["FutureSeedRuntime | None"] = ContextVar("future_seed_runtime", default=None)
+_PATCHED = False
+
+
+@dataclass
+class ScalarFutureSeedConfig:
+    enabled: bool = True
+    start_layer: int = 0
+    prompt_only: bool = True
+    detach_seed: bool = True
+    rms_norm_seed: bool = True
+    clip_value: float | None = 1.0
+    alpha_init: float = 0.0
+    reset_on_full_attention: bool = True
+
+
+@dataclass
+class FutureSeedRuntime:
+    active: bool
+    config: ScalarFutureSeedConfig
+    injection_count: int = 0
+    captured_layers: list[int] | None = None
+    injected_layers: list[int] | None = None
+    previous_seed_present: bool = False
+    current_seed: torch.Tensor | None = None
+
+    def __post_init__(self) -> None:
+        if self.captured_layers is None:
+            self.captured_layers = []
+        if self.injected_layers is None:
+            self.injected_layers = []
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "active": self.active,
+            "config": asdict(self.config),
+            "injection_count": self.injection_count,
+            "captured_layers": list(self.captured_layers or []),
+            "injected_layers": list(self.injected_layers or []),
+            "previous_seed_present": bool(self.previous_seed_present),
+        }
+
+
+def _resolve_qwen35_symbols() -> dict[str, Any]:
+    from transformers.models.qwen3_5.modular_qwen3_5 import (
+        Cache,
+        Qwen3_5DecoderLayer,
+        Qwen3_5ForCausalLM,
+        Qwen3_5GatedDeltaNet,
+        Qwen3_5TextConfig,
+        Qwen3_5TextModel,
+        Qwen3_5TextRotaryEmbedding,
+        Qwen3VLTextRotaryEmbedding,
+        apply_mask_to_padding_states,
+    )
+
+    return {
+        "Cache": Cache,
+        "Qwen3_5DecoderLayer": Qwen3_5DecoderLayer,
+        "Qwen3_5ForCausalLM": Qwen3_5ForCausalLM,
+        "Qwen3_5GatedDeltaNet": Qwen3_5GatedDeltaNet,
+        "Qwen3_5TextConfig": Qwen3_5TextConfig,
+        "Qwen3_5TextModel": Qwen3_5TextModel,
+        "Qwen3_5TextRotaryEmbedding": Qwen3_5TextRotaryEmbedding,
+        "Qwen3VLTextRotaryEmbedding": Qwen3VLTextRotaryEmbedding,
+        "apply_mask_to_padding_states": apply_mask_to_padding_states,
+    }
+
+
+def _prepare_seed(seed: torch.Tensor | None, module: nn.Module, cfg: ScalarFutureSeedConfig) -> torch.Tensor | None:
+    if seed is None:
+        return None
+
+    out = seed.detach() if cfg.detach_seed else seed
+    out = out.to(device=module.A_log.device, dtype=torch.float32)
+
+    if cfg.rms_norm_seed:
+        reduce_dims = tuple(range(1, out.ndim))
+        rms = out.pow(2).mean(dim=reduce_dims, keepdim=True).sqrt().clamp_min(1e-6)
+        out = out / rms
+
+    out = out * module.fs_alpha.float()
+
+    if cfg.clip_value is not None:
+        out = out.clamp(min=-cfg.clip_value, max=cfg.clip_value)
+
+    return out.to(dtype=module.A_log.dtype)
+
+
+def install_qwen35_upstream_compat_fixes() -> None:
+    symbols = _resolve_qwen35_symbols()
+    Qwen3_5TextRotaryEmbedding = symbols["Qwen3_5TextRotaryEmbedding"]
+    Qwen3VLTextRotaryEmbedding = symbols["Qwen3VLTextRotaryEmbedding"]
+
+    if not getattr(Qwen3_5TextRotaryEmbedding, "_future_seed_fixed_init", False):
+        def fixed_init(self, config):
+            self.config = config
+            self.rope_parameters = config.rope_parameters
+            Qwen3VLTextRotaryEmbedding.__init__(self, config)
+
+        Qwen3_5TextRotaryEmbedding.__init__ = fixed_init
+        Qwen3_5TextRotaryEmbedding._future_seed_fixed_init = True
+
+
+def install_qwen35_scalar_fs_patch() -> None:
+    global _PATCHED
+    if _PATCHED:
+        return
+
+    install_qwen35_upstream_compat_fixes()
+    symbols = _resolve_qwen35_symbols()
+    Qwen3_5GatedDeltaNet = symbols["Qwen3_5GatedDeltaNet"]
+    Qwen3_5DecoderLayer = symbols["Qwen3_5DecoderLayer"]
+    Qwen3_5TextModel = symbols["Qwen3_5TextModel"]
+    apply_mask_to_padding_states = symbols["apply_mask_to_padding_states"]
+
+    original_gated_forward = Qwen3_5GatedDeltaNet.forward
+    original_decoder_forward = Qwen3_5DecoderLayer.forward
+    original_text_model_forward = Qwen3_5TextModel.forward
+
+    def patched_gated_forward(self, hidden_states, cache_params=None, attention_mask=None):
+        hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
+        batch_size, seq_len, _ = hidden_states.shape
+        use_precomputed_states = cache_params is not None and cache_params.has_previous_state(self.layer_idx) and seq_len == 1
+
+        if use_precomputed_states:
+            conv_state = cache_params.layers[self.layer_idx].conv_states
+            recurrent_state = cache_params.layers[self.layer_idx].recurrent_states
+
+        mixed_qkv = self.in_proj_qkv(hidden_states).transpose(1, 2)
+        z = self.in_proj_z(hidden_states).reshape(batch_size, seq_len, -1, self.head_v_dim)
+        b = self.in_proj_b(hidden_states)
+        a = self.in_proj_a(hidden_states)
+
+        if use_precomputed_states:
+            mixed_qkv = self.causal_conv1d_update(
+                mixed_qkv,
+                conv_state,
+                self.conv1d.weight.squeeze(1),
+                self.conv1d.bias,
+                self.activation,
+            )
+        else:
+            if cache_params is not None:
+                conv_state = F.pad(mixed_qkv, (self.conv_kernel_size - mixed_qkv.shape[-1], 0))
+                conv_state = cache_params.update_conv_state(conv_state, self.layer_idx)
+            if self.causal_conv1d_fn is not None:
+                mixed_qkv = self.causal_conv1d_fn(
+                    x=mixed_qkv,
+                    weight=self.conv1d.weight.squeeze(1),
+                    bias=self.conv1d.bias,
+                    activation=self.activation,
+                    seq_idx=None,
+                )
+            else:
+                mixed_qkv = F.silu(self.conv1d(mixed_qkv)[:, :, :seq_len])
+
+        mixed_qkv = mixed_qkv.transpose(1, 2)
+        query, key, value = torch.split(mixed_qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1)
+        query = query.reshape(batch_size, seq_len, -1, self.head_k_dim)
+        key = key.reshape(batch_size, seq_len, -1, self.head_k_dim)
+        value = value.reshape(batch_size, seq_len, -1, self.head_v_dim)
+
+        beta = b.sigmoid()
+        g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
+        if self.num_v_heads // self.num_k_heads > 1:
+            query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
+            key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
+
+        fs_cfg = getattr(self, "_future_seed_config", None)
+        fs_selected = bool(getattr(self, "_future_seed_selected", False))
+        fs_active = bool(fs_cfg and fs_selected and seq_len > 1)
+        incoming_seed = getattr(self, "_future_seed_initial_state_override", None)
+        prepared_seed = _prepare_seed(incoming_seed, self, fs_cfg) if fs_active else None
+
+        if not use_precomputed_states:
+            core_attn_out, last_recurrent_state = self.chunk_gated_delta_rule(
+                query,
+                key,
+                value,
+                g=g,
+                beta=beta,
+                initial_state=prepared_seed,
+                output_final_state=(cache_params is not None) or fs_active,
+                use_qk_l2norm_in_kernel=True,
+            )
+        else:
+            core_attn_out, last_recurrent_state = self.recurrent_gated_delta_rule(
+                query,
+                key,
+                value,
+                g=g,
+                beta=beta,
+                initial_state=recurrent_state,
+                output_final_state=cache_params is not None,
+                use_qk_l2norm_in_kernel=True,
+            )
+
+        if cache_params is not None:
+            cache_params.update_recurrent_state(last_recurrent_state, self.layer_idx)
+
+        self._future_seed_last_recurrent_state = last_recurrent_state if fs_active else None
+        self._future_seed_used_input_state = prepared_seed is not None
+
+        core_attn_out = core_attn_out.reshape(-1, self.head_v_dim)
+        z = z.reshape(-1, self.head_v_dim)
+        core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = core_attn_out.reshape(batch_size, seq_len, -1)
+        return self.out_proj(core_attn_out)
+
+    def patched_decoder_forward(self, *args, **kwargs):
+        runtime = _RUNTIME.get()
+        if runtime is not None and getattr(runtime, "active", False) and self.layer_type == "linear_attention":
+            if getattr(self.linear_attn, "_future_seed_selected", False):
+                self.linear_attn._future_seed_initial_state_override = runtime.current_seed
+                runtime.previous_seed_present = runtime.current_seed is not None
+            else:
+                self.linear_attn._future_seed_initial_state_override = None
+
+        output = original_decoder_forward(self, *args, **kwargs)
+
+        if runtime is not None and getattr(runtime, "active", False):
+            if self.layer_type == "linear_attention":
+                if getattr(self.linear_attn, "_future_seed_selected", False):
+                    runtime.current_seed = getattr(self.linear_attn, "_future_seed_last_recurrent_state", None)
+                    runtime.captured_layers.append(self.linear_attn.layer_idx)
+                    if getattr(self.linear_attn, "_future_seed_used_input_state", False):
+                        runtime.injection_count += 1
+                        runtime.injected_layers.append(self.linear_attn.layer_idx)
+                else:
+                    runtime.current_seed = None
+            elif self.layer_type == "full_attention" and runtime.config.reset_on_full_attention:
+                runtime.current_seed = None
+
+        return output
+
+    def patched_text_model_forward(self, *args, **kwargs):
+        fs_cfg = getattr(self, "_future_seed_config", None)
+        if fs_cfg is None or not fs_cfg.enabled:
+            outputs = original_text_model_forward(self, *args, **kwargs)
+            self._future_seed_last_runtime = None
+            return outputs
+
+        input_ids = kwargs.get("input_ids")
+        if input_ids is None and len(args) > 0:
+            input_ids = args[0]
+        inputs_embeds = kwargs.get("inputs_embeds")
+
+        seq_len = None
+        if input_ids is not None:
+            seq_len = input_ids.shape[1]
+        elif inputs_embeds is not None:
+            seq_len = inputs_embeds.shape[1]
+
+        active = seq_len is not None and (not fs_cfg.prompt_only or seq_len > 1)
+        runtime = FutureSeedRuntime(active=bool(active), config=fs_cfg)
+        token = _RUNTIME.set(runtime)
+        try:
+            outputs = original_text_model_forward(self, *args, **kwargs)
+            self._future_seed_last_runtime = runtime.summary()
+            return outputs
+        finally:
+            _RUNTIME.reset(token)
+
+    Qwen3_5GatedDeltaNet.forward = patched_gated_forward
+    Qwen3_5DecoderLayer.forward = patched_decoder_forward
+    Qwen3_5TextModel.forward = patched_text_model_forward
+    Qwen3_5GatedDeltaNet._future_seed_original_forward = original_gated_forward
+    Qwen3_5DecoderLayer._future_seed_original_forward = original_decoder_forward
+    Qwen3_5TextModel._future_seed_original_forward = original_text_model_forward
+    _PATCHED = True
+
+
+def _get_text_backbone(model: nn.Module) -> nn.Module:
+    return getattr(model, "model", model)
+
+
+def apply_scalar_future_seed(model: nn.Module, cfg: ScalarFutureSeedConfig) -> nn.Module:
+    install_qwen35_scalar_fs_patch()
+    backbone = _get_text_backbone(model)
+    backbone._future_seed_config = cfg
+
+    for idx, layer in enumerate(backbone.layers):
+        if getattr(layer, "layer_type", None) == "linear_attention" and idx >= cfg.start_layer:
+            if not hasattr(layer.linear_attn, "fs_alpha"):
+                layer.linear_attn.register_parameter(
+                    "fs_alpha",
+                    nn.Parameter(torch.tensor(float(cfg.alpha_init), dtype=torch.float32)),
+                )
+            layer.linear_attn._future_seed_config = cfg
+            layer.linear_attn._future_seed_selected = True
+        elif getattr(layer, "layer_type", None) == "linear_attention":
+            layer.linear_attn._future_seed_config = cfg
+            layer.linear_attn._future_seed_selected = False
+
+    return model
+
+
+def freeze_except_future_seed(model: nn.Module) -> list[str]:
+    trainable: list[str] = []
+    for name, param in model.named_parameters():
+        param.requires_grad = name.endswith("fs_alpha")
+        if param.requires_grad:
+            trainable.append(name)
+    return trainable
+
+
+def list_future_seed_parameters(model: nn.Module) -> list[str]:
+    return [name for name, _ in model.named_parameters() if name.endswith("fs_alpha")]
+
+
+def get_future_seed_runtime_stats(model: nn.Module) -> dict[str, Any] | None:
+    backbone = _get_text_backbone(model)
+    return getattr(backbone, "_future_seed_last_runtime", None)
