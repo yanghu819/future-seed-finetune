@@ -5,17 +5,40 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${ROOT_DIR}"
 
 RUN_MODE="${RUN_MODE:-smoke}"
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen35-scalar-fs-smoke}"
+EXPERIMENT_NAME_DEFAULT="qwen35-scalar-fs-smoke"
+if [[ "${RUN_MODE}" == "validate-config" ]]; then
+  EXPERIMENT_NAME_DEFAULT="qwen35-validate-config"
+elif [[ "${RUN_MODE}" == "validate-pretrained" ]]; then
+  EXPERIMENT_NAME_DEFAULT="qwen35-validate-pretrained"
+fi
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-${EXPERIMENT_NAME_DEFAULT}}"
 RUN_TIMESTAMP="${RUN_TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
 RUN_DIR="${ROOT_DIR}/runs/${EXPERIMENT_NAME}-${RUN_TIMESTAMP}"
 LOG_DIR="${RUN_DIR}/logs"
 RESULT_DIR="${RUN_DIR}/results"
+ENTRYPOINT="scripts/smoke_qwen35_scalar_fs.py"
+RESULT_FILE="${RESULT_DIR}/smoke_metrics.json"
+ERROR_LOG="${LOG_DIR}/smoke.stderr.log"
+
+case "${RUN_MODE}" in
+  smoke)
+    ;;
+  validate-config|validate-pretrained)
+    ENTRYPOINT="scripts/validate_qwen35_prefill.py"
+    RESULT_FILE="${RESULT_DIR}/validate_metrics.json"
+    ERROR_LOG="${LOG_DIR}/validate.stderr.log"
+    ;;
+  *)
+    echo "Unknown RUN_MODE=${RUN_MODE}" >&2
+    exit 2
+    ;;
+esac
 
 mkdir -p "${LOG_DIR}" "${RESULT_DIR}"
 
 COMMIT_SHA="$(git rev-parse HEAD 2>/dev/null || echo untracked)"
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-export ROOT_DIR RUN_MODE EXPERIMENT_NAME RUN_DIR COMMIT_SHA STARTED_AT
+export ROOT_DIR RUN_MODE EXPERIMENT_NAME RUN_DIR COMMIT_SHA STARTED_AT ENTRYPOINT
 
 python3 - <<'PY' > "${RUN_DIR}/metadata.json"
 import json
@@ -32,7 +55,7 @@ meta = {
     "commit_sha": commit_sha,
     "run_mode": run_mode,
     "config": {
-        "entrypoint": "scripts/smoke_qwen35_scalar_fs.py",
+        "entrypoint": os.environ.get("ENTRYPOINT", "scripts/smoke_qwen35_scalar_fs.py"),
         "experiment_name": experiment_name,
     },
     "started_at": started_at,
@@ -45,8 +68,21 @@ print(json.dumps(meta, indent=2))
 PY
 
 set +e
-uv run python scripts/smoke_qwen35_scalar_fs.py > "${RESULT_DIR}/smoke_metrics.json" 2> "${LOG_DIR}/smoke.stderr.log"
-EXIT_CODE=$?
+MODEL_DIR="${MODEL_DIR:-${ROOT_DIR}/artifacts/models/qwen3_5_9b_base_probe}"
+
+if [[ "${RUN_MODE}" == "smoke" ]]; then
+  export ENTRYPOINT
+  uv run python "${ENTRYPOINT}" > "${RESULT_FILE}" 2> "${ERROR_LOG}"
+  EXIT_CODE=$?
+elif [[ "${RUN_MODE}" == "validate-config" ]]; then
+  export ENTRYPOINT MODEL_DIR
+  uv run python "${ENTRYPOINT}" --model-dir "${MODEL_DIR}" > "${RESULT_FILE}" 2> "${ERROR_LOG}"
+  EXIT_CODE=$?
+else
+  export ENTRYPOINT MODEL_DIR
+  uv run python "${ENTRYPOINT}" --model-dir "${MODEL_DIR}" --from-pretrained > "${RESULT_FILE}" 2> "${ERROR_LOG}"
+  EXIT_CODE=$?
+fi
 set -e
 
 FINISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

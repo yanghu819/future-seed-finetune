@@ -1,24 +1,28 @@
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
+import sys
 
 import torch
 
 from future_seed_finetune import (
     ScalarFutureSeedConfig,
-    apply_qwen3next_scalar_future_seed,
+    apply_scalar_future_seed,
     freeze_except_future_seed,
     get_future_seed_runtime_stats,
+    install_qwen35_upstream_compat_fixes,
     list_future_seed_parameters,
 )
 
 
 def build_tiny_model():
-    from transformers.models.qwen3_next.configuration_qwen3_next import Qwen3NextConfig
-    from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextForCausalLM
+    with contextlib.redirect_stdout(sys.stderr):
+        install_qwen35_upstream_compat_fixes()
+        from transformers.models.qwen3_5.modular_qwen3_5 import Qwen3_5ForCausalLM, Qwen3_5TextConfig
 
-    config = Qwen3NextConfig(
+    config = Qwen3_5TextConfig(
         vocab_size=256,
         hidden_size=64,
         intermediate_size=128,
@@ -35,7 +39,7 @@ def build_tiny_model():
         mlp_only_layers=[],
     )
     config.mlp_only_layers = []
-    return Qwen3NextForCausalLM(config)
+    return Qwen3_5ForCausalLM(config)
 
 
 def main() -> None:
@@ -52,7 +56,7 @@ def main() -> None:
         alpha_init=0.25,
         reset_on_full_attention=True,
     )
-    apply_qwen3next_scalar_future_seed(model, fs_cfg)
+    apply_scalar_future_seed(model, fs_cfg)
     trainable = freeze_except_future_seed(model)
 
     optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=1e-2)
@@ -82,7 +86,7 @@ def main() -> None:
 
     result = {
         "status": "ok",
-        "smoke_backend": "qwen3_next_proxy",
+        "smoke_backend": "qwen3_5_tiny",
         "trainable_parameters": trainable,
         "future_seed_parameters": list_future_seed_parameters(model),
         "grad_norms": grad_norms,

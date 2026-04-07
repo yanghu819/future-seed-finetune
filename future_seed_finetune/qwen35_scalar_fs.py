@@ -104,10 +104,19 @@ def install_qwen35_upstream_compat_fixes() -> None:
     Qwen3VLTextRotaryEmbedding = symbols["Qwen3VLTextRotaryEmbedding"]
 
     if not getattr(Qwen3_5TextRotaryEmbedding, "_future_seed_fixed_init", False):
-        def fixed_init(self, config):
-            self.config = config
-            self.rope_parameters = config.rope_parameters
-            Qwen3VLTextRotaryEmbedding.__init__(self, config)
+        def fixed_compute_default_rope_parameters(config=None, device=None, seq_len=None):
+            base = config.rope_parameters["rope_theta"]
+            partial_rotary_factor = config.rope_parameters.get("partial_rotary_factor", 1.0)
+            head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+            dim = int(head_dim * partial_rotary_factor)
+            inv_freq = 1.0 / (
+                base ** (torch.arange(0, dim, 2, dtype=torch.int64).to(device=device, dtype=torch.float) / dim)
+            )
+            return inv_freq, 1.0
+
+        def fixed_init(self, config, device=None):
+            Qwen3_5TextRotaryEmbedding.compute_default_rope_parameters = staticmethod(fixed_compute_default_rope_parameters)
+            Qwen3VLTextRotaryEmbedding.__init__(self, config, device)
 
         Qwen3_5TextRotaryEmbedding.__init__ = fixed_init
         Qwen3_5TextRotaryEmbedding._future_seed_fixed_init = True
@@ -119,6 +128,9 @@ def install_qwen35_scalar_fs_patch() -> None:
         return
 
     install_qwen35_upstream_compat_fixes()
+    from .qwen3next_scalar_fs import install_qwen3next_scalar_fs_patch
+
+    install_qwen3next_scalar_fs_patch()
     symbols = _resolve_qwen35_symbols()
     Qwen3_5GatedDeltaNet = symbols["Qwen3_5GatedDeltaNet"]
     Qwen3_5DecoderLayer = symbols["Qwen3_5DecoderLayer"]
@@ -128,6 +140,34 @@ def install_qwen35_scalar_fs_patch() -> None:
     original_gated_forward = Qwen3_5GatedDeltaNet.forward
     original_decoder_forward = Qwen3_5DecoderLayer.forward
     original_text_model_forward = Qwen3_5TextModel.forward
+
+    def patched_text_model_forward(self, *args, **kwargs):
+        fs_cfg = getattr(self, "_future_seed_config", None)
+        if fs_cfg is None or not fs_cfg.enabled:
+            outputs = original_text_model_forward(self, *args, **kwargs)
+            self._future_seed_last_runtime = None
+            return outputs
+
+        input_ids = kwargs.get("input_ids")
+        if input_ids is None and len(args) > 0:
+            input_ids = args[0]
+        inputs_embeds = kwargs.get("inputs_embeds")
+
+        seq_len = None
+        if input_ids is not None:
+            seq_len = input_ids.shape[1]
+        elif inputs_embeds is not None:
+            seq_len = inputs_embeds.shape[1]
+
+        active = seq_len is not None and (not fs_cfg.prompt_only or seq_len > 1)
+        runtime = FutureSeedRuntime(active=bool(active), config=fs_cfg)
+        token = _RUNTIME.set(runtime)
+        try:
+            outputs = original_text_model_forward(self, *args, **kwargs)
+            self._future_seed_last_runtime = runtime.summary()
+            return outputs
+        finally:
+            _RUNTIME.reset(token)
 
     def patched_gated_forward(self, hidden_states, cache_params=None, attention_mask=None):
         hidden_states = apply_mask_to_padding_states(hidden_states, attention_mask)
@@ -244,34 +284,6 @@ def install_qwen35_scalar_fs_patch() -> None:
                 runtime.current_seed = None
 
         return output
-
-    def patched_text_model_forward(self, *args, **kwargs):
-        fs_cfg = getattr(self, "_future_seed_config", None)
-        if fs_cfg is None or not fs_cfg.enabled:
-            outputs = original_text_model_forward(self, *args, **kwargs)
-            self._future_seed_last_runtime = None
-            return outputs
-
-        input_ids = kwargs.get("input_ids")
-        if input_ids is None and len(args) > 0:
-            input_ids = args[0]
-        inputs_embeds = kwargs.get("inputs_embeds")
-
-        seq_len = None
-        if input_ids is not None:
-            seq_len = input_ids.shape[1]
-        elif inputs_embeds is not None:
-            seq_len = inputs_embeds.shape[1]
-
-        active = seq_len is not None and (not fs_cfg.prompt_only or seq_len > 1)
-        runtime = FutureSeedRuntime(active=bool(active), config=fs_cfg)
-        token = _RUNTIME.set(runtime)
-        try:
-            outputs = original_text_model_forward(self, *args, **kwargs)
-            self._future_seed_last_runtime = runtime.summary()
-            return outputs
-        finally:
-            _RUNTIME.reset(token)
 
     Qwen3_5GatedDeltaNet.forward = patched_gated_forward
     Qwen3_5DecoderLayer.forward = patched_decoder_forward
