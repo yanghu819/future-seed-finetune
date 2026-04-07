@@ -1,11 +1,14 @@
 from .qwen35_scalar_fs import (
     ScalarFutureSeedConfig,
     apply_scalar_future_seed,
+    detect_qwen35_pretrained_architecture,
     freeze_except_future_seed,
     get_future_seed_runtime_stats,
+    load_qwen35_full_config,
     install_qwen35_upstream_compat_fixes,
     load_qwen35_text_config,
     list_future_seed_parameters,
+    normalize_qwen35_full_config,
     normalize_qwen35_text_config,
 )
 from .qwen3next_scalar_fs import apply_qwen3next_scalar_future_seed
@@ -14,10 +17,13 @@ __all__ = [
     "ScalarFutureSeedConfig",
     "apply_scalar_future_seed",
     "apply_qwen3next_scalar_future_seed",
+    "detect_qwen35_pretrained_architecture",
     "freeze_except_future_seed",
     "get_future_seed_runtime_stats",
     "install_qwen35_upstream_compat_fixes",
+    "load_qwen35_full_config",
     "load_qwen35_text_config",
     "list_future_seed_parameters",
+    "normalize_qwen35_full_config",
     "normalize_qwen35_text_config",
 ]

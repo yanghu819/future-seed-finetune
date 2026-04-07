@@ -15,10 +15,12 @@ from torch.utils.data import DataLoader, Dataset
 from future_seed_finetune import (
     ScalarFutureSeedConfig,
     apply_scalar_future_seed,
+    detect_qwen35_pretrained_architecture,
     freeze_except_future_seed,
     get_future_seed_runtime_stats,
     install_qwen35_upstream_compat_fixes,
     list_future_seed_parameters,
+    load_qwen35_full_config,
     load_qwen35_text_config,
 )
 
@@ -76,7 +78,11 @@ def collate_batch(rows, tokenizer, max_length: int):
 def build_model(args, tokenizer):
     install_qwen35_upstream_compat_fixes()
     with contextlib.redirect_stdout(sys.stderr):
-        from transformers.models.qwen3_5.modular_qwen3_5 import Qwen3_5ForCausalLM, Qwen3_5TextConfig
+        from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+        from transformers.models.qwen3_5.modeling_qwen3_5 import (
+            Qwen3_5ForCausalLM,
+            Qwen3_5ForConditionalGeneration,
+        )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if args.model_backend == "tiny":
@@ -102,7 +108,13 @@ def build_model(args, tokenizer):
         model = Qwen3_5ForCausalLM(config)
     else:
         load_dtype = resolve_dtype(args.load_dtype)
-        config = load_qwen35_text_config(args.model_dir)
+        architecture = detect_qwen35_pretrained_architecture(args.model_dir)
+        if architecture == "conditional_generation":
+            config = load_qwen35_full_config(args.model_dir)
+            model_class = Qwen3_5ForConditionalGeneration
+        else:
+            config = load_qwen35_text_config(args.model_dir)
+            model_class = Qwen3_5ForCausalLM
         pretrained_kwargs = {
             "config": config,
             "torch_dtype": load_dtype,
@@ -111,11 +123,11 @@ def build_model(args, tokenizer):
         }
         if device.type == "cuda":
             pretrained_kwargs["device_map"] = {"": torch.cuda.current_device()}
-        model = Qwen3_5ForCausalLM.from_pretrained(
+        model = model_class.from_pretrained(
             args.model_dir,
             **pretrained_kwargs,
         )
-        config = model.config
+        config = getattr(model.config, "text_config", model.config)
         model._future_seed_loaded_via_device_map = bool(pretrained_kwargs["device_map"] is not None)
 
     fs_cfg = None

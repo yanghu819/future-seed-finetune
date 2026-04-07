@@ -55,27 +55,31 @@ class FutureSeedRuntime:
 
 
 def _resolve_qwen35_symbols() -> dict[str, Any]:
-    from transformers.models.qwen3_5.modular_qwen3_5 import (
+    from transformers.models.qwen3_5.configuration_qwen3_5 import (
+        Qwen3_5Config,
+        Qwen3_5TextConfig,
+    )
+    from transformers.models.qwen3_5.modeling_qwen3_5 import (
         Cache,
+        Qwen3_5ForConditionalGeneration,
         Qwen3_5DecoderLayer,
         Qwen3_5ForCausalLM,
         Qwen3_5GatedDeltaNet,
-        Qwen3_5TextConfig,
         Qwen3_5TextModel,
         Qwen3_5TextRotaryEmbedding,
-        Qwen3VLTextRotaryEmbedding,
         apply_mask_to_padding_states,
     )
 
     return {
         "Cache": Cache,
+        "Qwen3_5Config": Qwen3_5Config,
+        "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGeneration,
         "Qwen3_5DecoderLayer": Qwen3_5DecoderLayer,
         "Qwen3_5ForCausalLM": Qwen3_5ForCausalLM,
         "Qwen3_5GatedDeltaNet": Qwen3_5GatedDeltaNet,
         "Qwen3_5TextConfig": Qwen3_5TextConfig,
         "Qwen3_5TextModel": Qwen3_5TextModel,
         "Qwen3_5TextRotaryEmbedding": Qwen3_5TextRotaryEmbedding,
-        "Qwen3VLTextRotaryEmbedding": Qwen3VLTextRotaryEmbedding,
         "apply_mask_to_padding_states": apply_mask_to_padding_states,
     }
 
@@ -96,6 +100,38 @@ def load_qwen35_text_config(model_dir: str | Path) -> Any:
     text_config_dict = raw.get("text_config", raw)
     config = Qwen3_5TextConfig.from_dict(text_config_dict)
     return normalize_qwen35_text_config(config)
+
+
+def normalize_qwen35_full_config(config: Any) -> Any:
+    text_config = getattr(config, "text_config", None)
+    if text_config is not None:
+        config.text_config = normalize_qwen35_text_config(text_config)
+
+    vision_config = getattr(config, "vision_config", None)
+    if vision_config is not None:
+        deepstack_visual_indexes = getattr(vision_config, "deepstack_visual_indexes", None)
+        if isinstance(deepstack_visual_indexes, AttributeError) or deepstack_visual_indexes is None:
+            vision_config.deepstack_visual_indexes = []
+        else:
+            vision_config.deepstack_visual_indexes = list(deepstack_visual_indexes)
+        config.vision_config = vision_config
+    return config
+
+
+def load_qwen35_full_config(model_dir: str | Path) -> Any:
+    symbols = _resolve_qwen35_symbols()
+    Qwen3_5Config = symbols["Qwen3_5Config"]
+    raw = json.loads((Path(model_dir) / "config.json").read_text())
+    config = Qwen3_5Config.from_dict(raw)
+    return normalize_qwen35_full_config(config)
+
+
+def detect_qwen35_pretrained_architecture(model_dir: str | Path) -> str:
+    raw = json.loads((Path(model_dir) / "config.json").read_text())
+    architectures = set(raw.get("architectures", []))
+    if "Qwen3_5ForConditionalGeneration" in architectures:
+        return "conditional_generation"
+    return "causal_lm"
 
 
 def _prepare_seed(seed: torch.Tensor | None, module: nn.Module, cfg: ScalarFutureSeedConfig) -> torch.Tensor | None:
@@ -121,7 +157,6 @@ def _prepare_seed(seed: torch.Tensor | None, module: nn.Module, cfg: ScalarFutur
 def install_qwen35_upstream_compat_fixes() -> None:
     symbols = _resolve_qwen35_symbols()
     Qwen3_5TextRotaryEmbedding = symbols["Qwen3_5TextRotaryEmbedding"]
-    Qwen3VLTextRotaryEmbedding = symbols["Qwen3VLTextRotaryEmbedding"]
 
     if not getattr(Qwen3_5TextRotaryEmbedding, "_future_seed_fixed_init", False):
         def fixed_compute_default_rope_parameters(config=None, device=None, seq_len=None):
@@ -136,7 +171,19 @@ def install_qwen35_upstream_compat_fixes() -> None:
 
         def fixed_init(self, config, device=None):
             Qwen3_5TextRotaryEmbedding.compute_default_rope_parameters = staticmethod(fixed_compute_default_rope_parameters)
-            Qwen3VLTextRotaryEmbedding.__init__(self, config, device)
+            nn.Module.__init__(self)
+            self.max_seq_len_cached = config.max_position_embeddings
+            self.original_max_seq_len = config.max_position_embeddings
+            self.config = config
+            self.rope_type = self.config.rope_parameters["rope_type"]
+            rope_init_fn = self.compute_default_rope_parameters
+            if self.rope_type != "default":
+                from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+                rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+            inv_freq, self.attention_scaling = rope_init_fn(self.config, device)
+            self.register_buffer("inv_freq", inv_freq, persistent=False)
+            self.register_buffer("original_inv_freq", inv_freq.clone(), persistent=False)
+            self.mrope_section = config.rope_parameters.get("mrope_section", [11, 11, 10])
 
         Qwen3_5TextRotaryEmbedding.__init__ = fixed_init
         Qwen3_5TextRotaryEmbedding._future_seed_fixed_init = True
@@ -315,6 +362,11 @@ def install_qwen35_scalar_fs_patch() -> None:
 
 
 def _get_text_backbone(model: nn.Module) -> nn.Module:
+    if hasattr(model, "language_model"):
+        return model.language_model
+    core = getattr(model, "model", None)
+    if core is not None and hasattr(core, "language_model"):
+        return core.language_model
     return getattr(model, "model", model)
 
 

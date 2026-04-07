@@ -12,9 +12,11 @@ from accelerate import init_empty_weights
 from future_seed_finetune import (
     ScalarFutureSeedConfig,
     apply_scalar_future_seed,
+    detect_qwen35_pretrained_architecture,
     freeze_except_future_seed,
     get_future_seed_runtime_stats,
     install_qwen35_upstream_compat_fixes,
+    load_qwen35_full_config,
     list_future_seed_parameters,
     load_qwen35_text_config,
 )
@@ -43,7 +45,11 @@ def main() -> None:
         install_qwen35_upstream_compat_fixes()
 
         from transformers import AutoTokenizer
-        from transformers.models.qwen3_5.modular_qwen3_5 import Qwen3_5ForCausalLM, Qwen3_5TextConfig
+        from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+        from transformers.models.qwen3_5.modeling_qwen3_5 import (
+            Qwen3_5ForCausalLM,
+            Qwen3_5ForConditionalGeneration,
+        )
 
     model_dir = Path(args.model_dir)
     tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=False)
@@ -52,15 +58,22 @@ def main() -> None:
 
     if args.from_pretrained:
         load_dtype = resolve_dtype(args.load_dtype)
+        architecture = detect_qwen35_pretrained_architecture(model_dir)
+        if architecture == "conditional_generation":
+            model_config = load_qwen35_full_config(model_dir)
+            model_class = Qwen3_5ForConditionalGeneration
+        else:
+            model_config = config
+            model_class = Qwen3_5ForCausalLM
         pretrained_kwargs = {
-            "config": config,
+            "config": model_config,
             "torch_dtype": load_dtype,
             "device_map": None,
             "low_cpu_mem_usage": args.low_cpu_mem_usage,
         }
         if device.type == "cuda":
             pretrained_kwargs["device_map"] = {"": torch.cuda.current_device()}
-        model = Qwen3_5ForCausalLM.from_pretrained(
+        model = model_class.from_pretrained(
             model_dir,
             **pretrained_kwargs,
         )
