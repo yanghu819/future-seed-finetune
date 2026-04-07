@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${ROOT_DIR}"
+. "${ROOT_DIR}/repo_env.sh"
 
 RUN_MODE="${RUN_MODE:-smoke}"
 FS_MODE="${FS_MODE:-enabled}"

@@ -28,6 +28,7 @@ The first goal is not end-task quality. It is to verify that:
 - `setup.sh`: install deps with `uv`
 - `down.sh`: create local artifact/cache layout
 - `run.sh`: run smoke and write metadata/results under `runs/`
+- `repo_env.sh`: force `uv` / Hugging Face / transformers / pip caches into `artifacts/cache/` under the repo root
 
 ## Quickstart
 
@@ -81,3 +82,4 @@ RUN_MODE=train-smoke FS_MODE=disabled bash ./run.sh
 - This local implementation was developed on a machine where `/fangxueji` is read-only, so the equivalent local path was used during development.
 - The repo now includes a local compatibility patch for the current `transformers main` `qwen3_5` constructor bugs, so tiny-model smoke can run directly on `qwen3_5`.
 - Full `Qwen3.5-9B-Base` pretrained validation is supported, but it depends on downloading the full checkpoint and is expected to be run on a machine with enough RAM or GPU memory.
+- Repo scripts now pin `uv`, Hugging Face, transformers, tokenizers, torch, and pip caches to `artifacts/cache/` so no runtime cache should land under `~`.
