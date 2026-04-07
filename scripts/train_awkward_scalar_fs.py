@@ -195,7 +195,7 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--max-length", type=int, default=256)
     parser.add_argument("--alpha-init", type=float, default=0.25)
-    parser.add_argument("--start-layer", type=int, default=1)
+    parser.add_argument("--start-layer", type=int, default=-1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--unfreeze-backbone", action="store_true")
     parser.add_argument("--disable-future-seed", action="store_true")
