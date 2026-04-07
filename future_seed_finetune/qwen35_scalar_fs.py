@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from typing import Any
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -76,6 +78,24 @@ def _resolve_qwen35_symbols() -> dict[str, Any]:
         "Qwen3VLTextRotaryEmbedding": Qwen3VLTextRotaryEmbedding,
         "apply_mask_to_padding_states": apply_mask_to_padding_states,
     }
+
+
+def normalize_qwen35_text_config(config: Any) -> Any:
+    mlp_only_layers = getattr(config, "mlp_only_layers", None)
+    if isinstance(mlp_only_layers, AttributeError) or mlp_only_layers is None:
+        config.mlp_only_layers = []
+    else:
+        config.mlp_only_layers = list(mlp_only_layers)
+    return config
+
+
+def load_qwen35_text_config(model_dir: str | Path) -> Any:
+    symbols = _resolve_qwen35_symbols()
+    Qwen3_5TextConfig = symbols["Qwen3_5TextConfig"]
+    raw = json.loads((Path(model_dir) / "config.json").read_text())
+    text_config_dict = raw.get("text_config", raw)
+    config = Qwen3_5TextConfig.from_dict(text_config_dict)
+    return normalize_qwen35_text_config(config)
 
 
 def _prepare_seed(seed: torch.Tensor | None, module: nn.Module, cfg: ScalarFutureSeedConfig) -> torch.Tensor | None:

@@ -4,7 +4,9 @@ from .qwen35_scalar_fs import (
     freeze_except_future_seed,
     get_future_seed_runtime_stats,
     install_qwen35_upstream_compat_fixes,
+    load_qwen35_text_config,
     list_future_seed_parameters,
+    normalize_qwen35_text_config,
 )
 from .qwen3next_scalar_fs import apply_qwen3next_scalar_future_seed
 
@@ -15,5 +17,7 @@ __all__ = [
     "freeze_except_future_seed",
     "get_future_seed_runtime_stats",
     "install_qwen35_upstream_compat_fixes",
+    "load_qwen35_text_config",
     "list_future_seed_parameters",
+    "normalize_qwen35_text_config",
 ]

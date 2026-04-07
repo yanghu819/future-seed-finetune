@@ -19,6 +19,7 @@ from future_seed_finetune import (
     get_future_seed_runtime_stats,
     install_qwen35_upstream_compat_fixes,
     list_future_seed_parameters,
+    load_qwen35_text_config,
 )
 
 def resolve_dtype(name: str) -> torch.dtype:
@@ -100,18 +101,15 @@ def build_model(args, tokenizer):
         model = Qwen3_5ForCausalLM(config)
     else:
         load_dtype = resolve_dtype(args.load_dtype)
+        config = load_qwen35_text_config(args.model_dir)
         model = Qwen3_5ForCausalLM.from_pretrained(
             args.model_dir,
+            config=config,
             torch_dtype=load_dtype,
             device_map=None,
             low_cpu_mem_usage=args.low_cpu_mem_usage,
         )
         config = model.config
-        mlp_only_layers = getattr(config, "mlp_only_layers", None)
-        if isinstance(mlp_only_layers, AttributeError) or mlp_only_layers is None:
-            config.mlp_only_layers = []
-        else:
-            config.mlp_only_layers = list(mlp_only_layers)
 
     fs_cfg = None
     if not args.disable_future_seed:

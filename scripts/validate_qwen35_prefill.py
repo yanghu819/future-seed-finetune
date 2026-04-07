@@ -16,6 +16,7 @@ from future_seed_finetune import (
     get_future_seed_runtime_stats,
     install_qwen35_upstream_compat_fixes,
     list_future_seed_parameters,
+    load_qwen35_text_config,
 )
 
 def resolve_dtype(name: str) -> torch.dtype:
@@ -46,14 +47,8 @@ def main() -> None:
 
     model_dir = Path(args.model_dir)
     tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=False)
-    raw = json.loads((model_dir / "config.json").read_text())
-    text_config_dict = raw.get("text_config", raw)
-    config = Qwen3_5TextConfig.from_dict(text_config_dict)
-    mlp_only_layers = getattr(config, "mlp_only_layers", None)
-    if isinstance(mlp_only_layers, AttributeError) or mlp_only_layers is None:
-        config.mlp_only_layers = []
-    else:
-        config.mlp_only_layers = list(mlp_only_layers)
+    config = load_qwen35_text_config(model_dir)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if args.from_pretrained:
         load_dtype = resolve_dtype(args.load_dtype)
@@ -64,6 +59,7 @@ def main() -> None:
             device_map=None,
             low_cpu_mem_usage=args.low_cpu_mem_usage,
         )
+        model.to(device)
         run_forward = True
     else:
         with init_empty_weights():
@@ -84,6 +80,7 @@ def main() -> None:
     trainable = freeze_except_future_seed(model)
 
     encoded = tokenizer(args.prompt, return_tensors="pt")
+    encoded = {k: v.to(device) for k, v in encoded.items()}
     logits_shape = None
     runtime = None
     if run_forward:
