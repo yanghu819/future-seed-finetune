@@ -1,0 +1,52 @@
+{
+  "date": "2026-04-08",
+  "repo": "future-seed-finetune",
+  "experiment": "qwen3.5-0.8b-fullval-rerun6",
+  "purpose": "Compare corrected deep-layer scalar Future-Seed against a frozen disabled control on the full synthetic awkward-task validation split.",
+  "model": {
+    "id": "Qwen/Qwen3.5-0.8B",
+    "load_dtype": "bfloat16",
+    "low_cpu_mem_usage": true
+  },
+  "settings": {
+    "batch_size": 1,
+    "max_steps": 10,
+    "eval_limit": 0,
+    "dataset_sizes": {
+      "awkward": 64,
+      "friendly": 64
+    }
+  },
+  "runs": {
+    "deepfs": {
+      "commit_sha": "75f0a663a341f8256e3d8278903c76698abda3b6",
+      "run_dir": "runs/qwen35-0p8b-train-pretrained-deepfs-fullval-rerun6-20260408T011643Z",
+      "exit_status": 0,
+      "future_seed_enabled": true,
+      "future_seed_start_layer": 16,
+      "trainable_parameter_count": 6,
+      "effective_train_steps": 10,
+      "loss_start": 5.852052688598633,
+      "loss_end": 5.670927047729492,
+      "loss_min": 5.292881011962891,
+      "eval_awkward_exact_match": 1.0,
+      "eval_friendly_exact_match": 0.984375,
+      "train_runtime": {
+        "captured_layers": [16, 17, 18, 20, 21, 22],
+        "injected_layers": [17, 18, 21, 22],
+        "injection_count": 4
+      }
+    },
+    "baseline_disabled": {
+      "commit_sha": "75f0a663a341f8256e3d8278903c76698abda3b6",
+      "run_dir": "runs/qwen35-0p8b-train-pretrained-baseline-fullval-rerun6-20260408T011643Z",
+      "exit_status": 0,
+      "future_seed_enabled": false,
+      "trainable_parameter_count": 0,
+      "effective_train_steps": 0,
+      "eval_awkward_exact_match": 1.0,
+      "eval_friendly_exact_match": 1.0
+    }
+  },
+  "conclusion": "After fixing the Qwen3.5-0.8B loading path and restricting scalar Future-Seed to the last 8 text layers, the method becomes stable but still does not beat the frozen baseline on the current synthetic awkward task."
+}
