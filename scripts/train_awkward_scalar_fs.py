@@ -138,7 +138,7 @@ def build_model(args, tokenizer):
             prompt_only=True,
             detach_seed=True,
             rms_norm_seed=True,
-            clip_value=1.0,
+            clip_value=args.seed_clip_value,
             alpha_init=args.alpha_init,
             reset_on_full_attention=True,
         )
@@ -195,6 +195,7 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--max-length", type=int, default=256)
     parser.add_argument("--alpha-init", type=float, default=0.25)
+    parser.add_argument("--seed-clip-value", type=float, default=1.0)
     parser.add_argument("--start-layer", type=int, default=-1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--unfreeze-backbone", action="store_true")
@@ -202,6 +203,9 @@ def main() -> None:
     parser.add_argument("--load-dtype", choices=["float32", "bfloat16", "float16"], default="float32")
     parser.add_argument("--low-cpu-mem-usage", action="store_true")
     parser.add_argument("--eval-limit", type=int, default=0)
+    parser.add_argument("--skip-nonfinite-loss", action="store_true")
+    parser.add_argument("--grad-clip-norm", type=float, default=0.0)
+    parser.add_argument("--fs-alpha-clamp", type=float, default=0.0)
     parser.add_argument("--tiny-hidden-size", type=int, default=32)
     parser.add_argument("--tiny-intermediate-size", type=int, default=64)
     parser.add_argument("--tiny-num-layers", type=int, default=4)
@@ -242,18 +246,47 @@ def main() -> None:
 
         losses = []
         train_runtime = None
+        skipped_nonfinite_losses = 0
+        skipped_nonfinite_grads = 0
+        last_grad_norm = None
         model.train()
         effective_steps = 0
         if optimizer is not None and args.max_steps > 0:
+            optimizer.zero_grad(set_to_none=True)
             for _step in range(args.max_steps):
                 batch = next(batches)
                 batch = {k: v.to(device) for k, v in batch.items()}
                 out = model(**batch, use_cache=False)
-                loss = out.loss
+                loss = out.loss.float()
                 train_runtime = get_future_seed_runtime_stats(model)
+                if not torch.isfinite(loss):
+                    skipped_nonfinite_losses += 1
+                    optimizer.zero_grad(set_to_none=True)
+                    if args.skip_nonfinite_loss:
+                        continue
+                    raise RuntimeError(f"non-finite loss encountered: {loss.item()}")
                 loss.backward()
+                grad_invalid = False
+                if args.grad_clip_norm > 0:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(params, args.grad_clip_norm)
+                    last_grad_norm = float(grad_norm.detach().float().cpu().item())
+                    grad_invalid = not torch.isfinite(grad_norm)
+                else:
+                    for param in params:
+                        if param.grad is not None and not torch.isfinite(param.grad).all():
+                            grad_invalid = True
+                            break
+                if grad_invalid:
+                    skipped_nonfinite_grads += 1
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
                 optimizer.step()
-                optimizer.zero_grad()
+                if args.fs_alpha_clamp > 0:
+                    with torch.no_grad():
+                        for name, param in model.named_parameters():
+                            if name.endswith("fs_alpha"):
+                                param.clamp_(-args.fs_alpha_clamp, args.fs_alpha_clamp)
+                optimizer.zero_grad(set_to_none=True)
                 losses.append(float(loss.item()))
                 effective_steps += 1
 
@@ -279,9 +312,16 @@ def main() -> None:
             "effective_train_steps": effective_steps,
             "batch_size": args.batch_size,
             "learning_rate": args.lr,
+            "seed_clip_value": args.seed_clip_value,
+            "skip_nonfinite_loss": bool(args.skip_nonfinite_loss),
+            "grad_clip_norm": args.grad_clip_norm,
+            "fs_alpha_clamp": args.fs_alpha_clamp,
             "loss_start": losses[0] if losses else None,
             "loss_end": losses[-1] if losses else None,
             "loss_min": min(losses) if losses else None,
+            "skipped_nonfinite_losses": skipped_nonfinite_losses,
+            "skipped_nonfinite_grads": skipped_nonfinite_grads,
+            "last_grad_norm": last_grad_norm,
             "trainable_parameter_count": sum(p.numel() for p in model.parameters() if p.requires_grad),
             "future_seed_parameters": list_future_seed_parameters(model),
             "trainable_parameters_preview": trainable[:20],
