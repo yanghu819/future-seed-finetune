@@ -26,6 +26,8 @@ class ScalarFutureSeedConfig:
     alpha_init: float = 0.0
     enable_delta_adapter: bool = False
     seed_projector_rank: int = 0
+    projection_lora_rank: int = 0
+    projection_lora_alpha: float = 1.0
     reset_on_full_attention: bool = True
 
 
@@ -185,6 +187,26 @@ def _apply_seed_projector(
     return out.to(dtype=module.A_log.dtype)
 
 
+def _apply_projection_lora(
+    hidden_states: torch.Tensor,
+    module: nn.Module,
+    prefix: str,
+    cfg: ScalarFutureSeedConfig,
+) -> torch.Tensor | None:
+    if cfg.projection_lora_rank <= 0:
+        return None
+    lora_a = getattr(module, f"{prefix}_lora_A", None)
+    lora_b = getattr(module, f"{prefix}_lora_B", None)
+    if lora_a is None or lora_b is None:
+        return None
+
+    scale = float(cfg.projection_lora_alpha) / float(cfg.projection_lora_rank)
+    hidden_float = hidden_states.float()
+    delta = F.linear(hidden_float, lora_a.float())
+    delta = F.linear(delta, lora_b.float())
+    return (delta * scale).to(dtype=hidden_states.dtype)
+
+
 def install_qwen35_upstream_compat_fixes() -> None:
     symbols = _resolve_qwen35_symbols()
     Qwen3_5TextRotaryEmbedding = symbols["Qwen3_5TextRotaryEmbedding"]
@@ -276,8 +298,17 @@ def install_qwen35_scalar_fs_patch() -> None:
             conv_state = cache_params.layers[self.layer_idx].conv_states
             recurrent_state = cache_params.layers[self.layer_idx].recurrent_states
 
+        fs_cfg = getattr(self, "_future_seed_config", None)
+        fs_selected = bool(getattr(self, "_future_seed_selected", False))
+        fs_active = bool(fs_cfg and fs_selected and seq_len > 1)
+        incoming_seed = getattr(self, "_future_seed_initial_state_override", None)
+
         mixed_qkv = self.in_proj_qkv(hidden_states).transpose(1, 2)
-        z = self.in_proj_z(hidden_states).reshape(batch_size, seq_len, -1, self.head_v_dim)
+        z_hidden = self.in_proj_z(hidden_states)
+        z_lora = _apply_projection_lora(hidden_states, self, "z", fs_cfg) if fs_cfg else None
+        if z_lora is not None:
+            z_hidden = z_hidden + z_lora
+        z = z_hidden.reshape(batch_size, seq_len, -1, self.head_v_dim)
         b = self.in_proj_b(hidden_states)
         a = self.in_proj_a(hidden_states)
 
@@ -316,10 +347,6 @@ def install_qwen35_scalar_fs_patch() -> None:
             query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
             key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
 
-        fs_cfg = getattr(self, "_future_seed_config", None)
-        fs_selected = bool(getattr(self, "_future_seed_selected", False))
-        fs_active = bool(fs_cfg and fs_selected and seq_len > 1)
-        incoming_seed = getattr(self, "_future_seed_initial_state_override", None)
         prepared_seed = _prepare_seed(incoming_seed, self, fs_cfg) if fs_active else None
         if fs_active:
             prepared_seed = _apply_seed_projector(prepared_seed, hidden_states, self, fs_cfg)
@@ -357,7 +384,11 @@ def install_qwen35_scalar_fs_patch() -> None:
         z = z.reshape(-1, self.head_v_dim)
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(batch_size, seq_len, -1)
-        core_attn_out = self.out_proj(core_attn_out)
+        out_input = core_attn_out
+        core_attn_out = self.out_proj(out_input)
+        out_lora = _apply_projection_lora(out_input, self, "out", fs_cfg) if fs_cfg else None
+        if out_lora is not None:
+            core_attn_out = core_attn_out + out_lora
         if fs_active and getattr(self, "delta_gain", None) is not None:
             gain = 1.0 + self.delta_gain.to(dtype=core_attn_out.dtype).view(1, 1, -1)
             bias = self.delta_bias.to(dtype=core_attn_out.dtype).view(1, 1, -1)
@@ -494,6 +525,59 @@ def apply_scalar_future_seed(model: nn.Module, cfg: ScalarFutureSeedConfig) -> n
                         )
                     ),
                 )
+            if cfg.projection_lora_rank > 0 and not hasattr(layer.linear_attn, "z_lora_A"):
+                rank = int(cfg.projection_lora_rank)
+                z_in = int(layer.linear_attn.in_proj_z.in_features)
+                z_out = int(layer.linear_attn.in_proj_z.out_features)
+                out_in = int(layer.linear_attn.out_proj.in_features)
+                out_out = int(layer.linear_attn.out_proj.out_features)
+
+                layer.linear_attn.register_parameter(
+                    "z_lora_A",
+                    nn.Parameter(
+                        torch.randn(
+                            rank,
+                            z_in,
+                            dtype=torch.float32,
+                            device=layer.linear_attn.out_proj.weight.device,
+                        )
+                        * 0.01
+                    ),
+                )
+                layer.linear_attn.register_parameter(
+                    "z_lora_B",
+                    nn.Parameter(
+                        torch.zeros(
+                            z_out,
+                            rank,
+                            dtype=torch.float32,
+                            device=layer.linear_attn.out_proj.weight.device,
+                        )
+                    ),
+                )
+                layer.linear_attn.register_parameter(
+                    "out_lora_A",
+                    nn.Parameter(
+                        torch.randn(
+                            rank,
+                            out_in,
+                            dtype=torch.float32,
+                            device=layer.linear_attn.out_proj.weight.device,
+                        )
+                        * 0.01
+                    ),
+                )
+                layer.linear_attn.register_parameter(
+                    "out_lora_B",
+                    nn.Parameter(
+                        torch.zeros(
+                            out_out,
+                            rank,
+                            dtype=torch.float32,
+                            device=layer.linear_attn.out_proj.weight.device,
+                        )
+                    ),
+                )
             layer.linear_attn._future_seed_config = cfg
             layer.linear_attn._future_seed_selected = True
         elif getattr(layer, "layer_type", None) == "linear_attention":
@@ -514,6 +598,10 @@ def freeze_except_future_seed(model: nn.Module) -> list[str]:
             or name.endswith("seed_proj_out")
             or name.endswith("seed_gate_vector")
             or name.endswith("seed_gate_bias")
+            or name.endswith("z_lora_A")
+            or name.endswith("z_lora_B")
+            or name.endswith("out_lora_A")
+            or name.endswith("out_lora_B")
         )
         if param.requires_grad:
             trainable.append(name)
@@ -529,6 +617,10 @@ def list_future_seed_parameters(model: nn.Module) -> list[str]:
         "seed_proj_out",
         "seed_gate_vector",
         "seed_gate_bias",
+        "z_lora_A",
+        "z_lora_B",
+        "out_lora_A",
+        "out_lora_B",
     )
     return [name for name, _ in model.named_parameters() if name.endswith(suffixes)]
 

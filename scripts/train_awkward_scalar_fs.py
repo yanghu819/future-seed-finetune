@@ -351,6 +351,8 @@ def build_model(args, tokenizer):
             alpha_init=args.alpha_init,
             enable_delta_adapter=args.enable_delta_adapter,
             seed_projector_rank=args.seed_projector_rank,
+            projection_lora_rank=args.projection_lora_rank,
+            projection_lora_alpha=args.projection_lora_alpha,
             reset_on_full_attention=True,
         )
         apply_scalar_future_seed(model, fs_cfg)
@@ -423,6 +425,8 @@ def main() -> None:
     parser.add_argument("--seed-clip-value", type=float, default=1.0)
     parser.add_argument("--start-layer", type=int, default=-1)
     parser.add_argument("--seed-projector-rank", type=int, default=0)
+    parser.add_argument("--projection-lora-rank", type=int, default=0)
+    parser.add_argument("--projection-lora-alpha", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--unfreeze-backbone", action="store_true")
     parser.add_argument("--disable-future-seed", action="store_true")
@@ -626,6 +630,8 @@ def main() -> None:
             "learning_rate": args.lr,
             "seed_clip_value": args.seed_clip_value,
             "seed_projector_rank": args.seed_projector_rank,
+            "projection_lora_rank": args.projection_lora_rank,
+            "projection_lora_alpha": args.projection_lora_alpha,
             "optimize_in_eval_mode": bool(args.optimize_in_eval_mode),
             "skip_nonfinite_loss": bool(args.skip_nonfinite_loss),
             "strict_prompt_only": bool(args.strict_prompt_only),
