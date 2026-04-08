@@ -24,6 +24,7 @@ class ScalarFutureSeedConfig:
     rms_norm_seed: bool = True
     clip_value: float | None = 1.0
     alpha_init: float = 0.0
+    enable_delta_adapter: bool = False
     reset_on_full_attention: bool = True
 
 
@@ -324,7 +325,12 @@ def install_qwen35_scalar_fs_patch() -> None:
         z = z.reshape(-1, self.head_v_dim)
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(batch_size, seq_len, -1)
-        return self.out_proj(core_attn_out)
+        core_attn_out = self.out_proj(core_attn_out)
+        if fs_active and getattr(self, "delta_gain", None) is not None:
+            gain = 1.0 + self.delta_gain.to(dtype=core_attn_out.dtype).view(1, 1, -1)
+            bias = self.delta_bias.to(dtype=core_attn_out.dtype).view(1, 1, -1)
+            core_attn_out = core_attn_out * gain + bias
+        return core_attn_out
 
     def patched_decoder_forward(self, *args, **kwargs):
         runtime = _RUNTIME.get()
@@ -382,6 +388,16 @@ def apply_scalar_future_seed(model: nn.Module, cfg: ScalarFutureSeedConfig) -> n
                     "fs_alpha",
                     nn.Parameter(torch.tensor(float(cfg.alpha_init), dtype=torch.float32)),
                 )
+            if cfg.enable_delta_adapter and not hasattr(layer.linear_attn, "delta_gain"):
+                hidden_size = int(layer.linear_attn.out_proj.out_features)
+                layer.linear_attn.register_parameter(
+                    "delta_gain",
+                    nn.Parameter(torch.zeros(hidden_size, dtype=torch.float32)),
+                )
+                layer.linear_attn.register_parameter(
+                    "delta_bias",
+                    nn.Parameter(torch.zeros(hidden_size, dtype=torch.float32)),
+                )
             layer.linear_attn._future_seed_config = cfg
             layer.linear_attn._future_seed_selected = True
         elif getattr(layer, "layer_type", None) == "linear_attention":
@@ -394,14 +410,19 @@ def apply_scalar_future_seed(model: nn.Module, cfg: ScalarFutureSeedConfig) -> n
 def freeze_except_future_seed(model: nn.Module) -> list[str]:
     trainable: list[str] = []
     for name, param in model.named_parameters():
-        param.requires_grad = name.endswith("fs_alpha")
+        param.requires_grad = (
+            name.endswith("fs_alpha")
+            or name.endswith("delta_gain")
+            or name.endswith("delta_bias")
+        )
         if param.requires_grad:
             trainable.append(name)
     return trainable
 
 
 def list_future_seed_parameters(model: nn.Module) -> list[str]:
-    return [name for name, _ in model.named_parameters() if name.endswith("fs_alpha")]
+    suffixes = ("fs_alpha", "delta_gain", "delta_bias")
+    return [name for name, _ in model.named_parameters() if name.endswith(suffixes)]
 
 
 def get_future_seed_runtime_stats(model: nn.Module) -> dict[str, Any] | None:

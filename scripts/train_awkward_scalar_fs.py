@@ -90,6 +90,21 @@ def extract_prediction(decoded: str, target: str) -> str:
     return normalize_answer(decoded)
 
 
+def compute_masked_ce_loss(logits: torch.Tensor, labels: torch.Tensor) -> tuple[torch.Tensor, int]:
+    shift_logits = logits[:, :-1, :].contiguous().float()
+    shift_labels = labels[:, 1:].contiguous()
+    active = shift_labels.ne(-100)
+    if not active.any():
+        return shift_logits.sum() * 0.0, 0
+    flat_logits = shift_logits.view(-1, shift_logits.size(-1))
+    flat_labels = shift_labels.view(-1)
+    flat_active = active.view(-1)
+    return (
+        torch.nn.functional.cross_entropy(flat_logits[flat_active], flat_labels[flat_active], reduction="mean"),
+        int(flat_active.sum().item()),
+    )
+
+
 def build_model(args, tokenizer):
     install_qwen35_upstream_compat_fixes()
     with contextlib.redirect_stdout(sys.stderr):
@@ -155,6 +170,7 @@ def build_model(args, tokenizer):
             rms_norm_seed=True,
             clip_value=args.seed_clip_value,
             alpha_init=args.alpha_init,
+            enable_delta_adapter=args.enable_delta_adapter,
             reset_on_full_attention=True,
         )
         apply_scalar_future_seed(model, fs_cfg)
@@ -222,6 +238,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--unfreeze-backbone", action="store_true")
     parser.add_argument("--disable-future-seed", action="store_true")
+    parser.add_argument("--enable-delta-adapter", action="store_true")
     parser.add_argument("--load-dtype", choices=["float32", "bfloat16", "float16"], default="float32")
     parser.add_argument("--low-cpu-mem-usage", action="store_true")
     parser.add_argument("--eval-limit", type=int, default=0)
@@ -272,6 +289,7 @@ def main() -> None:
         train_runtime = None
         skipped_nonfinite_losses = 0
         skipped_nonfinite_grads = 0
+        skipped_empty_targets = 0
         last_grad_norm = None
         if args.optimize_in_eval_mode:
             model.eval()
@@ -283,9 +301,17 @@ def main() -> None:
             for _step in range(args.max_steps):
                 batch = next(batches)
                 batch = {k: v.to(device) for k, v in batch.items()}
-                out = model(**batch, use_cache=False)
-                loss = out.loss.float()
+                out = model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    use_cache=False,
+                )
+                loss, active_targets = compute_masked_ce_loss(out.logits, batch["labels"])
                 train_runtime = get_future_seed_runtime_stats(model)
+                if active_targets == 0:
+                    skipped_empty_targets += 1
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
                 if not torch.isfinite(loss):
                     skipped_nonfinite_losses += 1
                     optimizer.zero_grad(set_to_none=True)
@@ -350,6 +376,7 @@ def main() -> None:
             "status": "ok",
             "model_backend": args.model_backend,
             "future_seed_enabled": not args.disable_future_seed,
+            "delta_adapter_enabled": bool(args.enable_delta_adapter and not args.disable_future_seed),
             "unfreeze_backbone": args.unfreeze_backbone,
             "train_steps": args.max_steps,
             "effective_train_steps": effective_steps,
@@ -365,6 +392,7 @@ def main() -> None:
             "loss_min": min(losses) if losses else None,
             "skipped_nonfinite_losses": skipped_nonfinite_losses,
             "skipped_nonfinite_grads": skipped_nonfinite_grads,
+            "skipped_empty_targets": skipped_empty_targets,
             "last_grad_norm": last_grad_norm,
             "trainable_parameter_count": sum(p.numel() for p in model.parameters() if p.requires_grad),
             "future_seed_parameters": list_future_seed_parameters(model),
