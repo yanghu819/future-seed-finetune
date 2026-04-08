@@ -262,6 +262,85 @@ def make_record_retrieval_alias(rng: random.Random, order_type: str, n_facts: in
     }
 
 
+def make_record_retrieval_digit_long(rng: random.Random, order_type: str, n_facts: int = 24, n_fillers: int = 24) -> dict[str, str]:
+    chosen_people = rng.sample(PEOPLE, n_facts)
+    mapping = {person: str(rng.randrange(10)) for person in chosen_people}
+    target_person = rng.choice(chosen_people)
+    fact_lines = [f"record {person} uses code {mapping[person]}" for person in chosen_people]
+    filler_lines = []
+    for idx in range(n_fillers):
+        word_a, word_b, word_c = rng.sample(FILLER_WORDS, 3)
+        filler_lines.append(f"memo_{idx:03d}: {word_a} {word_b} {word_c}.")
+    lines = fact_lines + filler_lines
+    rng.shuffle(lines)
+    notes = "\n".join(lines)
+    task = "Answer with a single digit only."
+    question = f"What code does {target_person} use?"
+
+    if order_type == "friendly":
+        prompt = (
+            f"Task: {task}\n\n"
+            f"Records:\n{notes}\n\n"
+            f"Question: {question}\n"
+            f"Answer: "
+        )
+    elif order_type == "awkward":
+        prompt = (
+            f"Task: {task}\n\n"
+            f"Question first: {question}\n\n"
+            f"You must search the records before answering.\n"
+            f"Records:\n{notes}\n\n"
+            f"Answer: "
+        )
+    else:
+        raise ValueError(f"unknown order_type={order_type}")
+
+    return {
+        "order_type": order_type,
+        "variant": "retrieval_digit_long",
+        "prompt": prompt,
+        "target": mapping[target_person],
+    }
+
+
+def make_record_niah_digit(rng: random.Random, order_type: str, haystack_lines: int = 96) -> dict[str, str]:
+    digit = str(rng.randrange(10))
+    filler = []
+    for idx in range(haystack_lines):
+        word_a, word_b, word_c = rng.sample(FILLER_WORDS, 3)
+        filler.append(f"note_{idx:03d}: {word_a} {word_b} {word_c}.")
+    insert_at = rng.randrange(len(filler) + 1)
+    filler.insert(insert_at, f"security memo: the pass digit is {digit}.")
+    notes = "\n".join(filler)
+    task = "Answer with exactly one digit."
+    question = "What is the pass digit hidden in the notes?"
+
+    if order_type == "friendly":
+        prompt = (
+            f"Task: {task}\n\n"
+            f"Notes:\n{notes}\n\n"
+            f"Question: {question}\n"
+            f"Answer: "
+        )
+    elif order_type == "awkward":
+        prompt = (
+            f"Task: {task}\n\n"
+            f"Question first: {question}\n\n"
+            f"You must search the notes to find the exact pass digit.\n"
+            f"Notes:\n{notes}\n\n"
+            f"Answer: "
+        )
+    else:
+        raise ValueError(f"unknown order_type={order_type}")
+
+    return {
+        "order_type": order_type,
+        "variant": "niah_digit",
+        "prompt": prompt,
+        "target": digit,
+    }
+
+
 def make_record(rng: random.Random, order_type: str, variant: str) -> dict[str, str]:
     if variant == "simple_lookup":
         return make_record_simple(rng, order_type)
@@ -271,6 +350,10 @@ def make_record(rng: random.Random, order_type: str, variant: str) -> dict[str, 
         return make_record_niah_passkey(rng, order_type)
     if variant == "retrieval_alias":
         return make_record_retrieval_alias(rng, order_type)
+    if variant == "retrieval_digit_long":
+        return make_record_retrieval_digit_long(rng, order_type)
+    if variant == "niah_digit":
+        return make_record_niah_digit(rng, order_type)
     raise ValueError(f"unknown variant={variant}")
 
 
@@ -289,7 +372,14 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--variant",
-        choices=["simple_lookup", "multihop_sum", "niah_passkey", "retrieval_alias"],
+        choices=[
+            "simple_lookup",
+            "multihop_sum",
+            "niah_passkey",
+            "retrieval_alias",
+            "retrieval_digit_long",
+            "niah_digit",
+        ],
         default="simple_lookup",
     )
     args = parser.parse_args()
