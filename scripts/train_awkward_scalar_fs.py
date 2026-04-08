@@ -358,6 +358,7 @@ def main() -> None:
         optimizer = torch.optim.AdamW(params, lr=args.lr) if params else None
 
         losses = []
+        loss_trace: list[dict[str, Any]] = []
         train_runtime = None
         skipped_nonfinite_losses = 0
         skipped_nonfinite_grads = 0
@@ -382,10 +383,30 @@ def main() -> None:
                 train_runtime = get_future_seed_runtime_stats(model)
                 if active_targets == 0:
                     skipped_empty_targets += 1
+                    loss_trace.append(
+                        {
+                            "step": len(loss_trace),
+                            "status": "skipped_empty_targets",
+                            "active_targets": 0,
+                            "loss": None,
+                            "grad_norm": None,
+                            "injection_count": (train_runtime or {}).get("injection_count", 0),
+                        }
+                    )
                     optimizer.zero_grad(set_to_none=True)
                     continue
                 if not torch.isfinite(loss):
                     skipped_nonfinite_losses += 1
+                    loss_trace.append(
+                        {
+                            "step": len(loss_trace),
+                            "status": "skipped_nonfinite_loss",
+                            "active_targets": active_targets,
+                            "loss": float(loss.detach().float().cpu().item()) if loss.numel() == 1 else None,
+                            "grad_norm": None,
+                            "injection_count": (train_runtime or {}).get("injection_count", 0),
+                        }
+                    )
                     optimizer.zero_grad(set_to_none=True)
                     if args.skip_nonfinite_loss:
                         continue
@@ -403,6 +424,16 @@ def main() -> None:
                             break
                 if grad_invalid:
                     skipped_nonfinite_grads += 1
+                    loss_trace.append(
+                        {
+                            "step": len(loss_trace),
+                            "status": "skipped_nonfinite_grad",
+                            "active_targets": active_targets,
+                            "loss": float(loss.detach().float().cpu().item()),
+                            "grad_norm": last_grad_norm,
+                            "injection_count": (train_runtime or {}).get("injection_count", 0),
+                        }
+                    )
                     optimizer.zero_grad(set_to_none=True)
                     continue
                 optimizer.step()
@@ -413,6 +444,16 @@ def main() -> None:
                                 param.clamp_(-args.fs_alpha_clamp, args.fs_alpha_clamp)
                 optimizer.zero_grad(set_to_none=True)
                 losses.append(float(loss.item()))
+                loss_trace.append(
+                    {
+                        "step": len(loss_trace),
+                        "status": "optimized",
+                        "active_targets": active_targets,
+                        "loss": float(loss.detach().float().cpu().item()),
+                        "grad_norm": last_grad_norm,
+                        "injection_count": (train_runtime or {}).get("injection_count", 0),
+                    }
+                )
                 effective_steps += 1
 
         eval_limit = args.eval_limit if args.eval_limit > 0 else None
@@ -433,10 +474,25 @@ def main() -> None:
         output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         alpha_values = {}
+        trainable_parameters = []
         for name, param in model.named_parameters():
+            if param.requires_grad:
+                trainable_parameters.append(
+                    {
+                        "name": name,
+                        "shape": list(param.shape),
+                        "numel": int(param.numel()),
+                    }
+                )
             if name.endswith("fs_alpha"):
                 alpha_values[name] = float(param.detach().float().cpu().item())
         (output_dir / "fs_alpha.json").write_text(json.dumps(alpha_values, indent=2, sort_keys=True) + "\n")
+        (output_dir / "trainable_parameters.json").write_text(
+            json.dumps(trainable_parameters, indent=2, sort_keys=True) + "\n"
+        )
+        with (output_dir / "loss_trace.jsonl").open("w", encoding="utf-8") as handle:
+            for row in loss_trace:
+                handle.write(json.dumps(row, ensure_ascii=True) + "\n")
 
         result = {
             "status": "ok",
@@ -456,6 +512,8 @@ def main() -> None:
             "loss_start": losses[0] if losses else None,
             "loss_end": losses[-1] if losses else None,
             "loss_min": min(losses) if losses else None,
+            "loss_trace_head": loss_trace[:5],
+            "loss_trace_tail": loss_trace[-5:],
             "skipped_nonfinite_losses": skipped_nonfinite_losses,
             "skipped_nonfinite_grads": skipped_nonfinite_grads,
             "skipped_empty_targets": skipped_empty_targets,
