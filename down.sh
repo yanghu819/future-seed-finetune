@@ -12,6 +12,7 @@ DOWNLOAD_MODE="${DOWNLOAD_MODE:-none}"
 MODEL_DIR="${MODEL_DIR:-${ROOT_DIR}/artifacts/models/qwen3_5_9b_base_probe}"
 GENERATE_DATASET="${GENERATE_DATASET:-none}"
 DATASET_DIR="${DATASET_DIR:-${ROOT_DIR}/artifacts/datasets/awkward_kv}"
+DATASET_VARIANT="${DATASET_VARIANT:-simple_lookup}"
 
 if [[ "${DOWNLOAD_MODE}" != "none" ]]; then
   CMD=(uv run python scripts/download_qwen35_probe_assets.py --model-id "${MODEL_ID}" --output-dir "${MODEL_DIR}")
@@ -22,7 +23,7 @@ if [[ "${DOWNLOAD_MODE}" != "none" ]]; then
 fi
 
 if [[ "${GENERATE_DATASET}" == "awkward-kv" ]]; then
-  uv run python scripts/build_awkward_kv_dataset.py --output-dir "${DATASET_DIR}"
+  uv run python scripts/build_awkward_kv_dataset.py --output-dir "${DATASET_DIR}" --variant "${DATASET_VARIANT}"
 fi
 
 if [[ "${DOWNLOAD_MODE}" == "none" && "${GENERATE_DATASET}" == "none" ]]; then
