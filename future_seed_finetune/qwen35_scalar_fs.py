@@ -386,17 +386,35 @@ def apply_scalar_future_seed(model: nn.Module, cfg: ScalarFutureSeedConfig) -> n
             if not hasattr(layer.linear_attn, "fs_alpha"):
                 layer.linear_attn.register_parameter(
                     "fs_alpha",
-                    nn.Parameter(torch.tensor(float(cfg.alpha_init), dtype=torch.float32)),
+                    nn.Parameter(
+                        torch.tensor(
+                            float(cfg.alpha_init),
+                            dtype=torch.float32,
+                            device=layer.linear_attn.out_proj.weight.device,
+                        )
+                    ),
                 )
             if cfg.enable_delta_adapter and not hasattr(layer.linear_attn, "delta_gain"):
                 hidden_size = int(layer.linear_attn.out_proj.out_features)
                 layer.linear_attn.register_parameter(
                     "delta_gain",
-                    nn.Parameter(torch.zeros(hidden_size, dtype=torch.float32)),
+                    nn.Parameter(
+                        torch.zeros(
+                            hidden_size,
+                            dtype=torch.float32,
+                            device=layer.linear_attn.out_proj.weight.device,
+                        )
+                    ),
                 )
                 layer.linear_attn.register_parameter(
                     "delta_bias",
-                    nn.Parameter(torch.zeros(hidden_size, dtype=torch.float32)),
+                    nn.Parameter(
+                        torch.zeros(
+                            hidden_size,
+                            dtype=torch.float32,
+                            device=layer.linear_attn.out_proj.weight.device,
+                        )
+                    ),
                 )
             layer.linear_attn._future_seed_config = cfg
             layer.linear_attn._future_seed_selected = True
