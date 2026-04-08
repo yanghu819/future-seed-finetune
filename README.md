@@ -26,6 +26,7 @@ The first goal is not end-task quality. It is to verify that:
 - `scripts/download_qwen35_probe_assets.py`: download Qwen3.5 probe assets or full weights
 - `scripts/validate_qwen35_prefill.py`: validate real Qwen3.5 config or pretrained checkpoint
 - `scripts/build_awkward_kv_dataset.py`: build a synthetic causally-awkward SFT dataset
+- `scripts/build_public_retrieval_dataset.py`: build a public retrieval/long-context benchmark dataset bundle
 - `scripts/train_awkward_scalar_fs.py`: train tiny or pretrained models on that dataset
 - `setup.sh`: install deps with `uv`
 - `down.sh`: create local artifact/cache layout
@@ -75,6 +76,29 @@ DOWNLOAD_MODE=probe GENERATE_DATASET=awkward-kv bash ./down.sh
 RUN_MODE=train-pretrained FS_MODE=disabled LOAD_DTYPE=bfloat16 LOW_CPU_MEM_USAGE=1 EVAL_LIMIT=8 MAX_STEPS=1 BATCH_SIZE=1 bash ./run.sh
 ```
 
+Build a public retrieval benchmark bundle from LongBench and the task's original train source:
+
+```bash
+DOWNLOAD_MODE=probe \
+GENERATE_DATASET=public-retrieval \
+DATASET_SOURCE=longbench \
+DATASET_TASK=hotpotqa \
+TRAIN_LIMIT=256 \
+EVAL_LIMIT=64 \
+bash ./down.sh
+```
+
+Run a pretrained frozen-control evaluation on that public bundle:
+
+```bash
+RUN_MODE=train-pretrained \
+FS_MODE=disabled \
+DATASET_DIR=$PWD/artifacts/datasets/public_retrieval/hotpotqa \
+MODEL_DIR=$PWD/artifacts/models/qwen3_5_9b_base_probe \
+MAX_STEPS=0 \
+bash ./run.sh
+```
+
 ## Current Status
 
 - `qwen3_5` tiny smoke is passing and confirms cross-layer seed injection on selected DeltaNet layers.
@@ -114,6 +138,10 @@ RUN_MODE=train-pretrained FS_MODE=disabled LOAD_DTYPE=bfloat16 LOW_CPU_MEM_USAGE
   - `scalar-FS only` was too weak, and `deepfs+delta` is the first version that both trains stably and preserves the real pretrained path
   - on the current synthetic awkward and retrieval-style tasks, it still does not beat the frozen baseline
   - so the current repo is a working research scaffold, not yet a positive quality result
+- Public benchmark integration is now available:
+  - `down.sh` supports `GENERATE_DATASET=public-retrieval`
+  - `LongBench` task smoke has been exercised for `hotpotqa` and `passage_retrieval_en`
+  - `train_awkward_scalar_fs.py` now reads `metadata.json` and reports generic `eval_results`
 
 ## Notes
 

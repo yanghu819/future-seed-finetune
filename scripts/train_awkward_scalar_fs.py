@@ -8,6 +8,8 @@ import sys
 from dataclasses import asdict
 from itertools import cycle
 from pathlib import Path
+import string
+from typing import Any
 
 import torch
 from torch.utils.data import DataLoader, Dataset
@@ -46,6 +48,12 @@ class JsonlDataset(Dataset):
         return self.rows[idx]
 
 
+def load_jsonl_rows(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
 def collate_batch(rows, tokenizer, max_length: int):
     pad_id = tokenizer.pad_token_id
     eos_id = tokenizer.eos_token_id
@@ -79,6 +87,13 @@ def normalize_answer(text: str) -> str:
     return " ".join(text.strip().split()).lower()
 
 
+def normalize_qa_answer(text: str) -> str:
+    text = normalize_answer(text)
+    text = "".join(ch for ch in text if ch not in string.punctuation)
+    text = re.sub(r"\b(a|an|the)\b", " ", text)
+    return " ".join(text.split())
+
+
 def extract_prediction(decoded: str, target: str) -> str:
     target_norm = normalize_answer(target)
     if re.fullmatch(r"\d+", target_norm):
@@ -88,6 +103,56 @@ def extract_prediction(decoded: str, target: str) -> str:
         match = re.search(r"[A-Za-z0-9_]+", decoded)
         return match.group(0).lower() if match else ""
     return normalize_answer(decoded)
+
+
+def exact_match_score(prediction: str, answers: list[str]) -> float:
+    pred = normalize_qa_answer(prediction)
+    return float(any(pred == normalize_qa_answer(answer) for answer in answers))
+
+
+def qa_f1_score(prediction: str, answers: list[str]) -> float:
+    pred_tokens = normalize_qa_answer(prediction).split()
+    if not pred_tokens:
+        return 0.0
+    best = 0.0
+    for answer in answers:
+        gold_tokens = normalize_qa_answer(answer).split()
+        if not gold_tokens:
+            continue
+        common = {}
+        for token in pred_tokens:
+            common[token] = min(pred_tokens.count(token), gold_tokens.count(token))
+        overlap = sum(common.values())
+        if overlap == 0:
+            continue
+        precision = overlap / len(pred_tokens)
+        recall = overlap / len(gold_tokens)
+        best = max(best, 2 * precision * recall / (precision + recall))
+    return best
+
+
+def score_prediction(prediction: str, answers: list[str], metric: str) -> float:
+    if metric == "qa_f1":
+        return qa_f1_score(prediction, answers)
+    return exact_match_score(prediction, answers)
+
+
+def load_dataset_bundle(dataset_dir: Path) -> tuple[JsonlDataset, dict[str, list[dict[str, Any]]], dict[str, Any] | None]:
+    metadata_path = dataset_dir / "metadata.json"
+    if metadata_path.exists():
+        metadata = json.loads(metadata_path.read_text())
+        train_rows = load_jsonl_rows(dataset_dir / "train.jsonl")
+        eval_splits = {
+            split_name: load_jsonl_rows(dataset_dir / f"{split_name}.jsonl")
+            for split_name in metadata.get("eval_splits", {})
+        }
+        return JsonlDataset(dataset_dir / "train.jsonl"), eval_splits, metadata
+    train_set = JsonlDataset(dataset_dir / "train.jsonl")
+    eval_splits = {
+        "awkward": JsonlDataset(dataset_dir / "valid_awkward.jsonl").rows,
+        "friendly": JsonlDataset(dataset_dir / "valid_friendly.jsonl").rows,
+    }
+    return train_set, eval_splits, None
 
 
 def compute_masked_ce_loss(logits: torch.Tensor, labels: torch.Tensor) -> tuple[torch.Tensor, int]:
@@ -201,11 +266,12 @@ def evaluate(
     eval_max_new_tokens: int = 8,
 ) -> dict[str, float]:
     model.eval()
-    correct = 0
+    total_score = 0.0
     eval_rows = rows[:limit] if limit is not None and limit > 0 else rows
     for row in eval_rows:
+        prompt_budget = max(1, max_length - eval_max_new_tokens)
         encoded = tokenizer(row["prompt"], return_tensors="pt", add_special_tokens=False)
-        encoded = {k: v[:, :max_length].to(device) for k, v in encoded.items()}
+        encoded = {k: v[:, :prompt_budget].to(device) for k, v in encoded.items()}
         with torch.no_grad():
             out = model.generate(
                 **encoded,
@@ -217,9 +283,15 @@ def evaluate(
             )
         new_tokens = out[0, encoded["input_ids"].shape[1] :]
         decoded = tokenizer.decode(new_tokens, skip_special_tokens=True)
-        pred = extract_prediction(decoded, row["target"])
-        correct += int(normalize_answer(pred) == normalize_answer(row["target"]))
-    return {"exact_match": correct / max(1, len(eval_rows)), "num_examples": len(eval_rows)}
+        answers = [str(x) for x in row.get("answers", [row["target"]])]
+        metric = str(row.get("metric", "exact_match"))
+        pred = extract_prediction(decoded, answers[0])
+        total_score += score_prediction(pred, answers, metric)
+    return {
+        "score": total_score / max(1, len(eval_rows)),
+        "metric": str((eval_rows[0] if eval_rows else {}).get("metric", "exact_match")),
+        "num_examples": len(eval_rows),
+    }
 
 
 def main() -> None:
@@ -270,17 +342,17 @@ def main() -> None:
             model.to(device)
 
         dataset_dir = Path(args.dataset_dir)
-        train_set = JsonlDataset(dataset_dir / "train.jsonl")
-        valid_awkward = JsonlDataset(dataset_dir / "valid_awkward.jsonl")
-        valid_friendly = JsonlDataset(dataset_dir / "valid_friendly.jsonl")
+        train_set, eval_splits, dataset_metadata = load_dataset_bundle(dataset_dir)
 
-        loader = DataLoader(
-            train_set,
-            batch_size=args.batch_size,
-            shuffle=True,
-            collate_fn=lambda rows: collate_batch(rows, tokenizer, args.max_length),
-        )
-        batches = cycle(loader)
+        batches = None
+        if len(train_set) > 0:
+            loader = DataLoader(
+                train_set,
+                batch_size=args.batch_size,
+                shuffle=True,
+                collate_fn=lambda rows: collate_batch(rows, tokenizer, args.max_length),
+            )
+            batches = cycle(loader)
 
         params = [p for p in model.parameters() if p.requires_grad]
         optimizer = torch.optim.AdamW(params, lr=args.lr) if params else None
@@ -296,7 +368,7 @@ def main() -> None:
         else:
             model.train()
         effective_steps = 0
-        if optimizer is not None and args.max_steps > 0:
+        if optimizer is not None and args.max_steps > 0 and batches is not None:
             optimizer.zero_grad(set_to_none=True)
             for _step in range(args.max_steps):
                 batch = next(batches)
@@ -344,24 +416,18 @@ def main() -> None:
                 effective_steps += 1
 
         eval_limit = args.eval_limit if args.eval_limit > 0 else None
-        awkward_metrics = evaluate(
-            model,
-            tokenizer,
-            valid_awkward.rows,
-            device,
-            args.max_length,
-            eval_limit,
-            args.eval_max_new_tokens,
-        )
-        friendly_metrics = evaluate(
-            model,
-            tokenizer,
-            valid_friendly.rows,
-            device,
-            args.max_length,
-            eval_limit,
-            args.eval_max_new_tokens,
-        )
+        eval_metrics = {
+            split_name: evaluate(
+                model,
+                tokenizer,
+                split_rows,
+                device,
+                args.max_length,
+                eval_limit,
+                args.eval_max_new_tokens,
+            )
+            for split_name, split_rows in eval_splits.items()
+        }
         eval_runtime = get_future_seed_runtime_stats(model)
 
         output_dir = Path(args.output_dir)
@@ -398,16 +464,22 @@ def main() -> None:
             "future_seed_parameters": list_future_seed_parameters(model),
             "trainable_parameters_preview": trainable[:20],
             "future_seed_config": asdict(fs_cfg) if fs_cfg is not None else None,
+            "dataset_metadata": dataset_metadata,
             "train_runtime": train_runtime,
             "eval_runtime": eval_runtime,
-            "eval_awkward": awkward_metrics,
-            "eval_friendly": friendly_metrics,
+            "eval_results": eval_metrics,
             "device": str(device),
             "load_dtype": args.load_dtype if args.model_backend == "pretrained" else None,
             "low_cpu_mem_usage": bool(args.low_cpu_mem_usage) if args.model_backend == "pretrained" else None,
             "eval_limit": args.eval_limit,
             "eval_max_new_tokens": args.eval_max_new_tokens,
         }
+        if "awkward" in eval_metrics:
+            result["eval_awkward"] = eval_metrics["awkward"]
+        if "friendly" in eval_metrics:
+            result["eval_friendly"] = eval_metrics["friendly"]
+        if "eval_longbench" in eval_metrics:
+            result["eval_longbench"] = eval_metrics["eval_longbench"]
     print(json.dumps(result, indent=2, sort_keys=True))
 
 

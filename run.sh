@@ -93,7 +93,20 @@ LOAD_DTYPE="${LOAD_DTYPE:-float32}"
 LOW_CPU_MEM_USAGE="${LOW_CPU_MEM_USAGE:-0}"
 EVAL_LIMIT="${EVAL_LIMIT:-0}"
 EVAL_MAX_NEW_TOKENS="${EVAL_MAX_NEW_TOKENS:-8}"
-MAX_LENGTH="${MAX_LENGTH:-256}"
+if [[ -z "${MAX_LENGTH:-}" && -f "${DATASET_DIR}/metadata.json" ]]; then
+  MAX_LENGTH="$(DATASET_DIR="${DATASET_DIR}" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+path = Path(os.environ["DATASET_DIR"]) / "metadata.json"
+data = json.loads(path.read_text())
+print(data.get("recommended_max_length", 256))
+PY
+)"
+else
+  MAX_LENGTH="${MAX_LENGTH:-256}"
+fi
 ALPHA_INIT="${ALPHA_INIT:-0.25}"
 START_LAYER="${START_LAYER:--1}"
 SEED_CLIP_VALUE="${SEED_CLIP_VALUE:-1.0}"

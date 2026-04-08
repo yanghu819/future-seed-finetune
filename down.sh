@@ -13,6 +13,10 @@ MODEL_DIR="${MODEL_DIR:-${ROOT_DIR}/artifacts/models/qwen3_5_9b_base_probe}"
 GENERATE_DATASET="${GENERATE_DATASET:-none}"
 DATASET_DIR="${DATASET_DIR:-${ROOT_DIR}/artifacts/datasets/awkward_kv}"
 DATASET_VARIANT="${DATASET_VARIANT:-simple_lookup}"
+DATASET_SOURCE="${DATASET_SOURCE:-longbench}"
+DATASET_TASK="${DATASET_TASK:-hotpotqa}"
+TRAIN_LIMIT="${TRAIN_LIMIT:-256}"
+EVAL_LIMIT="${EVAL_LIMIT:-64}"
 
 if [[ "${DOWNLOAD_MODE}" != "none" ]]; then
   CMD=(uv run python scripts/download_qwen35_probe_assets.py --model-id "${MODEL_ID}" --output-dir "${MODEL_DIR}")
@@ -24,6 +28,18 @@ fi
 
 if [[ "${GENERATE_DATASET}" == "awkward-kv" ]]; then
   uv run python scripts/build_awkward_kv_dataset.py --output-dir "${DATASET_DIR}" --variant "${DATASET_VARIANT}"
+fi
+
+if [[ "${GENERATE_DATASET}" == "public-retrieval" ]]; then
+  if [[ "${DATASET_SOURCE}" != "longbench" ]]; then
+    echo "Unsupported DATASET_SOURCE=${DATASET_SOURCE}" >&2
+    exit 2
+  fi
+  uv run python scripts/build_public_retrieval_dataset.py \
+    --output-dir "${DATASET_DIR}" \
+    --task "${DATASET_TASK}" \
+    --train-limit "${TRAIN_LIMIT}" \
+    --eval-limit "${EVAL_LIMIT}"
 fi
 
 if [[ "${DOWNLOAD_MODE}" == "none" && "${GENERATE_DATASET}" == "none" ]]; then
