@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
+import zipfile
 
 from datasets import load_dataset
+from huggingface_hub import hf_hub_download
 
 
 PUBLIC_TASKS: dict[str, dict[str, Any]] = {
@@ -34,6 +37,9 @@ PUBLIC_TASKS: dict[str, dict[str, Any]] = {
         "train_source": None,
     },
 }
+
+LONG_BENCH_DATA_ZIP_ENV = "LONG_BENCH_DATA_ZIP"
+DEFAULT_LONG_BENCH_DATA_ZIP = Path("artifacts/transfer/longbench/data.zip")
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -119,29 +125,55 @@ def build_train_prompt(task: str, question: str, context: str) -> str:
     )
 
 
-def eval_rows_from_longbench(task: str, limit: int) -> list[dict[str, Any]]:
-    spec = PUBLIC_TASKS[task]["eval_source"]
-    ds = load_dataset(spec["repo_id"], spec["config"], split=spec["split"], trust_remote_code=True)
+def resolve_longbench_data_zip() -> Path:
+    candidates: list[Path] = []
+    env_value = os.environ.get(LONG_BENCH_DATA_ZIP_ENV)
+    if env_value:
+        candidates.append(Path(env_value).expanduser())
+    candidates.append(DEFAULT_LONG_BENCH_DATA_ZIP)
+    for path in candidates:
+        if path.exists() and path.is_file():
+            return path
+    downloaded = hf_hub_download(
+        repo_id="THUDM/LongBench",
+        filename="data.zip",
+        repo_type="dataset",
+        endpoint=os.environ.get("HF_ENDPOINT"),
+        local_dir=str(DEFAULT_LONG_BENCH_DATA_ZIP.parent),
+    )
+    return Path(downloaded)
+
+
+def longbench_rows_from_local_zip(task: str, limit: int) -> list[dict[str, Any]]:
+    zip_path = resolve_longbench_data_zip()
+    inner_path = f"data/{task}.jsonl"
     rows: list[dict[str, Any]] = []
-    for idx, row in enumerate(ds):
-        answers = row.get("answers") or []
-        if not answers:
-            continue
-        rows.append(
-            {
-                "id": str(row.get("_id", idx)),
-                "task": task,
-                "metric": PUBLIC_TASKS[task]["metric"],
-                "order_type": "longbench_eval",
-                "variant": task,
-                "prompt": build_eval_prompt(task, row),
-                "target": str(answers[0]),
-                "answers": [str(x) for x in answers],
-            }
-        )
-        if limit > 0 and len(rows) >= limit:
-            break
+    with zipfile.ZipFile(zip_path) as zf:
+        with zf.open(inner_path) as handle:
+            for idx, raw_line in enumerate(handle):
+                row = json.loads(raw_line.decode("utf-8"))
+                answers = row.get("answers") or []
+                if not answers:
+                    continue
+                rows.append(
+                    {
+                        "id": str(row.get("_id", idx)),
+                        "task": task,
+                        "metric": PUBLIC_TASKS[task]["metric"],
+                        "order_type": "longbench_eval",
+                        "variant": task,
+                        "prompt": build_eval_prompt(task, row),
+                        "target": str(answers[0]),
+                        "answers": [str(x) for x in answers],
+                    }
+                )
+                if limit > 0 and len(rows) >= limit:
+                    break
     return rows
+
+
+def eval_rows_from_longbench(task: str, limit: int) -> list[dict[str, Any]]:
+    return longbench_rows_from_local_zip(task, limit)
 
 
 def train_rows_hotpotqa(limit: int) -> list[dict[str, Any]]:
