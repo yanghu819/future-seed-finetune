@@ -1,0 +1,32 @@
+{
+  "task": "retrieval_digit_long",
+  "context_fix": {
+    "max_length": 1024,
+    "note": "Earlier max_length=256 runs truncated answer tokens and produced empty-target batches."
+  },
+  "baseline": {
+    "run_dir": "runs/qwen35-0p8b-train-pretrained-baseline-retrievaldigit-max1024-rerun2-20260408T064845Z",
+    "future_seed_enabled": false,
+    "delta_adapter_enabled": false,
+    "effective_train_steps": 0,
+    "eval_awkward_exact_match": 1.0,
+    "eval_friendly_exact_match": 1.0
+  },
+  "deepfs_delta": {
+    "run_dir": "runs/qwen35-0p8b-train-pretrained-deepfsdelta-retrievaldigit-max1024-rerun7-20260408T064845Z",
+    "future_seed_enabled": true,
+    "delta_adapter_enabled": true,
+    "effective_train_steps": 10,
+    "skipped_empty_targets": 0,
+    "skipped_nonfinite_losses": 0,
+    "eval_awkward_exact_match": 1.0,
+    "eval_friendly_exact_match": 0.984375,
+    "trainable_parameter_count": 12294,
+    "last_grad_norm": 14.632787704467773
+  },
+  "conclusion": {
+    "pipeline_valid": true,
+    "beats_baseline": false,
+    "summary": "MAX_LENGTH=1024 fixes the empty-target training bug and enables real FS+delta optimization, but quality still does not beat the frozen baseline."
+  }
+}

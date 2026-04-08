@@ -102,9 +102,17 @@ RUN_MODE=train-pretrained FS_MODE=disabled LOAD_DTYPE=bfloat16 LOW_CPU_MEM_USAGE
   - frozen disabled control: `runs/qwen35-0p8b-train-pretrained-baseline-fullval-rerun6-20260408T011643Z`
   - deep-layer FS reaches `awkward = 1.0`, `friendly = 0.984375`
   - frozen disabled control reaches `awkward = 1.0`, `friendly = 1.0`
+- Retrieval-style `retrieval_digit_long` is now the first non-saturated benchmark line:
+  - old `max_length=256` runs silently truncated answer tokens during training, which is why earlier `deepfs+delta` runs showed `skipped_empty_targets > 0` and `effective_train_steps = 0`
+  - with `MAX_LENGTH=1024`, training now actually runs for the `deepfs+delta` path
+  - baseline full-eval control: `runs/qwen35-0p8b-train-pretrained-baseline-retrievaldigit-max1024-rerun2-20260408T064845Z`
+  - deepfs+delta train run: `runs/qwen35-0p8b-train-pretrained-deepfsdelta-retrievaldigit-max1024-rerun7-20260408T064845Z`
+  - baseline reaches `awkward = 1.0`, `friendly = 1.0`
+  - deepfs+delta reaches `awkward = 1.0`, `friendly = 0.984375`, with `effective_train_steps = 10`
 - Current conclusion:
   - the Future-Seed deep-layer scalar adapter is technically valid on real pretrained Qwen3.5 weights
-  - on this synthetic awkward task, it does not beat the frozen baseline
+  - `scalar-FS only` was too weak, and `deepfs+delta` is the first version that both trains stably and preserves the real pretrained path
+  - on the current synthetic awkward and retrieval-style tasks, it still does not beat the frozen baseline
   - so the current repo is a working research scaffold, not yet a positive quality result
 
 ## Notes
