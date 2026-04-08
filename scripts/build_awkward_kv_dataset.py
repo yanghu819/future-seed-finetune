@@ -37,6 +37,73 @@ FILLER_WORDS = [
     "zenith",
 ]
 
+CODE_WORDS = [
+    "atlas",
+    "bison",
+    "cedar",
+    "dune",
+    "ember",
+    "fjord",
+    "garnet",
+    "harbor",
+    "iris",
+    "jaguar",
+    "kepler",
+    "linen",
+    "mesa",
+    "nova",
+    "onyx",
+    "piper",
+    "quill",
+    "raven",
+    "solace",
+    "timber",
+    "umbra",
+    "vessel",
+    "warden",
+    "xylo",
+    "yonder",
+    "zephyr",
+    "acorn",
+    "brisk",
+    "cipher",
+    "delta",
+    "echo",
+    "falcon",
+    "glacier",
+    "hazel",
+    "indigo",
+    "jetty",
+    "kernel",
+    "lotus",
+    "mosaic",
+    "nectar",
+    "opal",
+    "praxis",
+    "quartz",
+    "relay",
+    "saffron",
+    "thicket",
+    "upland",
+    "velvet",
+    "whisper",
+    "xenial",
+    "yarrow",
+    "zen",
+    "anchor",
+    "beacon",
+    "cinder",
+    "drift",
+    "elm",
+    "fable",
+    "grove",
+    "hinge",
+    "islet",
+    "jewel",
+    "kindle",
+    "lumen",
+]
+
 
 def make_record_simple(rng: random.Random, order_type: str, n_facts: int = 8) -> dict[str, str]:
     chosen = rng.sample(PEOPLE, n_facts)
@@ -158,6 +225,43 @@ def make_record_niah_passkey(rng: random.Random, order_type: str, haystack_lines
     }
 
 
+def make_record_retrieval_alias(rng: random.Random, order_type: str, n_facts: int = 24) -> dict[str, str]:
+    chosen_people = rng.sample(PEOPLE, n_facts)
+    chosen_codes = rng.sample(CODE_WORDS, n_facts)
+    target_person = rng.choice(chosen_people)
+    mapping = {person: chosen_codes[i] for i, person in enumerate(chosen_people)}
+    fact_lines = [f"record {person} uses alias {mapping[person]}" for person in chosen_people]
+    rng.shuffle(fact_lines)
+    notes = "\n".join(fact_lines)
+    task = "Answer with the exact lowercase alias only."
+    question = f"What alias does {target_person} use?"
+
+    if order_type == "friendly":
+        prompt = (
+            f"Task: {task}\n\n"
+            f"Records:\n{notes}\n\n"
+            f"Question: {question}\n"
+            f"Answer: "
+        )
+    elif order_type == "awkward":
+        prompt = (
+            f"Task: {task}\n\n"
+            f"Question first: {question}\n\n"
+            f"You must search the records before answering.\n"
+            f"Records:\n{notes}\n\n"
+            f"Answer: "
+        )
+    else:
+        raise ValueError(f"unknown order_type={order_type}")
+
+    return {
+        "order_type": order_type,
+        "variant": "retrieval_alias",
+        "prompt": prompt,
+        "target": mapping[target_person],
+    }
+
+
 def make_record(rng: random.Random, order_type: str, variant: str) -> dict[str, str]:
     if variant == "simple_lookup":
         return make_record_simple(rng, order_type)
@@ -165,6 +269,8 @@ def make_record(rng: random.Random, order_type: str, variant: str) -> dict[str, 
         return make_record_multihop_sum(rng, order_type)
     if variant == "niah_passkey":
         return make_record_niah_passkey(rng, order_type)
+    if variant == "retrieval_alias":
+        return make_record_retrieval_alias(rng, order_type)
     raise ValueError(f"unknown variant={variant}")
 
 
@@ -181,7 +287,11 @@ def main() -> None:
     parser.add_argument("--train-size", type=int, default=256)
     parser.add_argument("--valid-size", type=int, default=64)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--variant", choices=["simple_lookup", "multihop_sum", "niah_passkey"], default="simple_lookup")
+    parser.add_argument(
+        "--variant",
+        choices=["simple_lookup", "multihop_sum", "niah_passkey", "retrieval_alias"],
+        default="simple_lookup",
+    )
     args = parser.parse_args()
 
     out = Path(args.output_dir)
