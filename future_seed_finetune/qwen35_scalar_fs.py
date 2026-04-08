@@ -25,6 +25,7 @@ class ScalarFutureSeedConfig:
     clip_value: float | None = 1.0
     alpha_init: float = 0.0
     enable_delta_adapter: bool = False
+    seed_projector_rank: int = 0
     reset_on_full_attention: bool = True
 
 
@@ -152,6 +153,35 @@ def _prepare_seed(seed: torch.Tensor | None, module: nn.Module, cfg: ScalarFutur
     if cfg.clip_value is not None:
         out = out.clamp(min=-cfg.clip_value, max=cfg.clip_value)
 
+    return out.to(dtype=module.A_log.dtype)
+
+
+def _apply_seed_projector(
+    prepared_seed: torch.Tensor | None,
+    hidden_states: torch.Tensor,
+    module: nn.Module,
+    cfg: ScalarFutureSeedConfig,
+) -> torch.Tensor | None:
+    if prepared_seed is None or cfg.seed_projector_rank <= 0:
+        return prepared_seed
+    if getattr(module, "seed_proj_in", None) is None:
+        return prepared_seed
+
+    seed_float = prepared_seed.float()
+    projected = torch.einsum("bhvk,kr->bhvr", seed_float, module.seed_proj_in.float())
+    projected = torch.einsum("bhvr,rk->bhvk", projected, module.seed_proj_out.float())
+
+    prompt_summary = hidden_states.float().mean(dim=1)
+    gate = torch.sigmoid(
+        F.linear(
+            prompt_summary,
+            module.seed_gate_vector.float().unsqueeze(0),
+            module.seed_gate_bias.float().view(1),
+        )
+    )
+    out = seed_float + gate.view(gate.shape[0], 1, 1, 1) * projected
+    if cfg.clip_value is not None:
+        out = out.clamp(min=-cfg.clip_value, max=cfg.clip_value)
     return out.to(dtype=module.A_log.dtype)
 
 
@@ -291,6 +321,8 @@ def install_qwen35_scalar_fs_patch() -> None:
         fs_active = bool(fs_cfg and fs_selected and seq_len > 1)
         incoming_seed = getattr(self, "_future_seed_initial_state_override", None)
         prepared_seed = _prepare_seed(incoming_seed, self, fs_cfg) if fs_active else None
+        if fs_active:
+            prepared_seed = _apply_seed_projector(prepared_seed, hidden_states, self, fs_cfg)
 
         if not use_precomputed_states:
             core_attn_out, last_recurrent_state = self.chunk_gated_delta_rule(
@@ -416,6 +448,52 @@ def apply_scalar_future_seed(model: nn.Module, cfg: ScalarFutureSeedConfig) -> n
                         )
                     ),
                 )
+            if cfg.seed_projector_rank > 0 and not hasattr(layer.linear_attn, "seed_proj_in"):
+                state_dim = int(layer.linear_attn.head_k_dim)
+                hidden_size = int(layer.linear_attn.out_proj.out_features)
+                rank = int(cfg.seed_projector_rank)
+                layer.linear_attn.register_parameter(
+                    "seed_proj_in",
+                    nn.Parameter(
+                        torch.zeros(
+                            state_dim,
+                            rank,
+                            dtype=torch.float32,
+                            device=layer.linear_attn.out_proj.weight.device,
+                        )
+                    ),
+                )
+                layer.linear_attn.register_parameter(
+                    "seed_proj_out",
+                    nn.Parameter(
+                        torch.zeros(
+                            rank,
+                            state_dim,
+                            dtype=torch.float32,
+                            device=layer.linear_attn.out_proj.weight.device,
+                        )
+                    ),
+                )
+                layer.linear_attn.register_parameter(
+                    "seed_gate_vector",
+                    nn.Parameter(
+                        torch.zeros(
+                            hidden_size,
+                            dtype=torch.float32,
+                            device=layer.linear_attn.out_proj.weight.device,
+                        )
+                    ),
+                )
+                layer.linear_attn.register_parameter(
+                    "seed_gate_bias",
+                    nn.Parameter(
+                        torch.zeros(
+                            1,
+                            dtype=torch.float32,
+                            device=layer.linear_attn.out_proj.weight.device,
+                        )
+                    ),
+                )
             layer.linear_attn._future_seed_config = cfg
             layer.linear_attn._future_seed_selected = True
         elif getattr(layer, "layer_type", None) == "linear_attention":
@@ -432,6 +510,10 @@ def freeze_except_future_seed(model: nn.Module) -> list[str]:
             name.endswith("fs_alpha")
             or name.endswith("delta_gain")
             or name.endswith("delta_bias")
+            or name.endswith("seed_proj_in")
+            or name.endswith("seed_proj_out")
+            or name.endswith("seed_gate_vector")
+            or name.endswith("seed_gate_bias")
         )
         if param.requires_grad:
             trainable.append(name)
@@ -439,7 +521,15 @@ def freeze_except_future_seed(model: nn.Module) -> list[str]:
 
 
 def list_future_seed_parameters(model: nn.Module) -> list[str]:
-    suffixes = ("fs_alpha", "delta_gain", "delta_bias")
+    suffixes = (
+        "fs_alpha",
+        "delta_gain",
+        "delta_bias",
+        "seed_proj_in",
+        "seed_proj_out",
+        "seed_gate_vector",
+        "seed_gate_bias",
+    )
     return [name for name, _ in model.named_parameters() if name.endswith(suffixes)]
 
 

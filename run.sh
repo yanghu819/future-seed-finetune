@@ -110,6 +110,7 @@ fi
 ALPHA_INIT="${ALPHA_INIT:-0.25}"
 START_LAYER="${START_LAYER:--1}"
 SEED_CLIP_VALUE="${SEED_CLIP_VALUE:-1.0}"
+SEED_PROJECTOR_RANK="${SEED_PROJECTOR_RANK:-0}"
 GRAD_CLIP_NORM="${GRAD_CLIP_NORM:-0.0}"
 FS_ALPHA_CLAMP="${FS_ALPHA_CLAMP:-0.0}"
 SKIP_NONFINITE_LOSS="${SKIP_NONFINITE_LOSS:-0}"
@@ -147,6 +148,7 @@ elif [[ "${RUN_MODE}" == "train-smoke" ]]; then
     --alpha-init "${ALPHA_INIT}" \
     --start-layer "${START_LAYER}" \
     --seed-clip-value "${SEED_CLIP_VALUE}" \
+    --seed-projector-rank "${SEED_PROJECTOR_RANK}" \
     --grad-clip-norm "${GRAD_CLIP_NORM}" \
     --fs-alpha-clamp "${FS_ALPHA_CLAMP}" \
     --eval-max-new-tokens "${EVAL_MAX_NEW_TOKENS}")
@@ -184,6 +186,7 @@ elif [[ "${RUN_MODE}" == "train-pretrained" ]]; then
     --alpha-init "${ALPHA_INIT}" \
     --start-layer "${START_LAYER}" \
     --seed-clip-value "${SEED_CLIP_VALUE}" \
+    --seed-projector-rank "${SEED_PROJECTOR_RANK}" \
     --grad-clip-norm "${GRAD_CLIP_NORM}" \
     --fs-alpha-clamp "${FS_ALPHA_CLAMP}" \
     --load-dtype "${LOAD_DTYPE}" \
