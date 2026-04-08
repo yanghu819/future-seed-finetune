@@ -93,6 +93,7 @@ LOAD_DTYPE="${LOAD_DTYPE:-float32}"
 LOW_CPU_MEM_USAGE="${LOW_CPU_MEM_USAGE:-0}"
 EVAL_LIMIT="${EVAL_LIMIT:-0}"
 EVAL_MAX_NEW_TOKENS="${EVAL_MAX_NEW_TOKENS:-8}"
+MAX_LENGTH="${MAX_LENGTH:-256}"
 ALPHA_INIT="${ALPHA_INIT:-0.25}"
 START_LAYER="${START_LAYER:--1}"
 SEED_CLIP_VALUE="${SEED_CLIP_VALUE:-1.0}"
@@ -125,6 +126,7 @@ elif [[ "${RUN_MODE}" == "train-smoke" ]]; then
     --model-dir "${MODEL_DIR}" \
     --model-backend tiny \
     --output-dir "${RUN_DIR}/outputs" \
+    --max-length "${MAX_LENGTH}" \
     --max-steps "${MAX_STEPS:-20}" \
     --batch-size "${BATCH_SIZE:-4}" \
     --lr "${LR:-5e-4}" \
@@ -158,6 +160,7 @@ elif [[ "${RUN_MODE}" == "train-pretrained" ]]; then
     --model-dir "${MODEL_DIR}" \
     --model-backend pretrained \
     --output-dir "${RUN_DIR}/outputs" \
+    --max-length "${MAX_LENGTH}" \
     --max-steps "${MAX_STEPS:-100}" \
     --batch-size "${BATCH_SIZE:-1}" \
     --lr "${LR:-1e-4}" \
