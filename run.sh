@@ -115,6 +115,7 @@ FS_ALPHA_CLAMP="${FS_ALPHA_CLAMP:-0.0}"
 SKIP_NONFINITE_LOSS="${SKIP_NONFINITE_LOSS:-0}"
 OPTIMIZE_IN_EVAL_MODE="${OPTIMIZE_IN_EVAL_MODE:-0}"
 ENABLE_DELTA_ADAPTER="${ENABLE_DELTA_ADAPTER:-0}"
+STRICT_PROMPT_ONLY="${STRICT_PROMPT_ONLY:-0}"
 
 if [[ "${RUN_MODE}" == "smoke" ]]; then
   export ENTRYPOINT
@@ -164,6 +165,9 @@ elif [[ "${RUN_MODE}" == "train-smoke" ]]; then
   if [[ "${ENABLE_DELTA_ADAPTER}" == "1" ]]; then
     TRAIN_CMD+=(--enable-delta-adapter)
   fi
+  if [[ "${STRICT_PROMPT_ONLY}" == "1" ]]; then
+    TRAIN_CMD+=(--strict-prompt-only)
+  fi
   "${TRAIN_CMD[@]}" > "${RESULT_FILE}" 2> "${ERROR_LOG}"
   EXIT_CODE=$?
 elif [[ "${RUN_MODE}" == "train-pretrained" ]]; then
@@ -202,6 +206,9 @@ elif [[ "${RUN_MODE}" == "train-pretrained" ]]; then
   fi
   if [[ "${ENABLE_DELTA_ADAPTER}" == "1" ]]; then
     TRAIN_CMD+=(--enable-delta-adapter)
+  fi
+  if [[ "${STRICT_PROMPT_ONLY}" == "1" ]]; then
+    TRAIN_CMD+=(--strict-prompt-only)
   fi
   "${TRAIN_CMD[@]}" > "${RESULT_FILE}" 2> "${ERROR_LOG}"
   EXIT_CODE=$?

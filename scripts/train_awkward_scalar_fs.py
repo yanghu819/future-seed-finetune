@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import contextlib
 import json
 import re
@@ -57,29 +58,65 @@ def load_jsonl_rows(path: Path) -> list[dict[str, Any]]:
 def collate_batch(rows, tokenizer, max_length: int):
     pad_id = tokenizer.pad_token_id
     eos_id = tokenizer.eos_token_id
-    input_ids = []
-    labels = []
+    combined_input_tensors = []
+    combined_label_tensors = []
+    prompt_tensors = []
+    target_input_tensors = []
+    target_label_tensors = []
     for row in rows:
         prompt_ids = tokenizer(row["prompt"], add_special_tokens=False).input_ids
         target_ids = tokenizer(row["target"], add_special_tokens=False).input_ids
-        ids = (prompt_ids + target_ids + [eos_id])[:max_length]
-        y = ([-100] * len(prompt_ids) + target_ids + [eos_id])[:max_length]
-        input_ids.append(torch.tensor(ids, dtype=torch.long))
-        labels.append(torch.tensor(y, dtype=torch.long))
+        target_ids = target_ids[: max(1, max_length - 1)]
+        prompt_budget = max(1, max_length - len(target_ids) - 1)
+        prompt_ids = prompt_ids[:prompt_budget]
+        combined_ids = prompt_ids + target_ids + [eos_id]
+        combined_labels = ([-100] * len(prompt_ids)) + target_ids + [eos_id]
+        combined_input_tensors.append(torch.tensor(combined_ids, dtype=torch.long))
+        combined_label_tensors.append(torch.tensor(combined_labels, dtype=torch.long))
+        prompt_tensors.append(torch.tensor(prompt_ids, dtype=torch.long))
+        target_input_tensors.append(torch.tensor(target_ids, dtype=torch.long))
+        target_label_tensors.append(torch.tensor(target_ids + [eos_id], dtype=torch.long))
 
-    max_len = max(x.numel() for x in input_ids)
-    padded_inputs = torch.full((len(rows), max_len), pad_id, dtype=torch.long)
-    padded_labels = torch.full((len(rows), max_len), -100, dtype=torch.long)
-    attention_mask = torch.zeros((len(rows), max_len), dtype=torch.long)
-    for i, (ids, y) in enumerate(zip(input_ids, labels)):
-        padded_inputs[i, : ids.numel()] = ids
-        padded_labels[i, : y.numel()] = y
-        attention_mask[i, : ids.numel()] = 1
+    max_combined_len = max(x.numel() for x in combined_input_tensors)
+    max_prompt_len = max(x.numel() for x in prompt_tensors)
+    max_target_input_len = max(x.numel() for x in target_input_tensors)
+    max_target_label_len = max(x.numel() for x in target_label_tensors)
+
+    padded_inputs = torch.full((len(rows), max_combined_len), pad_id, dtype=torch.long)
+    padded_labels = torch.full((len(rows), max_combined_len), -100, dtype=torch.long)
+    attention_mask = torch.zeros((len(rows), max_combined_len), dtype=torch.long)
+    padded_prompt_inputs = torch.full((len(rows), max_prompt_len), pad_id, dtype=torch.long)
+    prompt_attention_mask = torch.zeros((len(rows), max_prompt_len), dtype=torch.long)
+    padded_target_inputs = torch.full((len(rows), max_target_input_len), pad_id, dtype=torch.long)
+    padded_target_labels = torch.full((len(rows), max_target_label_len), -100, dtype=torch.long)
+    prompt_lengths = torch.zeros((len(rows),), dtype=torch.long)
+    target_input_lengths = torch.zeros((len(rows),), dtype=torch.long)
+    target_label_lengths = torch.zeros((len(rows),), dtype=torch.long)
+    for i, (combined_ids, combined_labels, prompt_ids, target_inputs, target_labels) in enumerate(
+        zip(combined_input_tensors, combined_label_tensors, prompt_tensors, target_input_tensors, target_label_tensors)
+    ):
+        padded_inputs[i, : combined_ids.numel()] = combined_ids
+        padded_labels[i, : combined_labels.numel()] = combined_labels
+        attention_mask[i, : combined_ids.numel()] = 1
+        padded_prompt_inputs[i, : prompt_ids.numel()] = prompt_ids
+        prompt_attention_mask[i, : prompt_ids.numel()] = 1
+        padded_target_inputs[i, : target_inputs.numel()] = target_inputs
+        padded_target_labels[i, : target_labels.numel()] = target_labels
+        prompt_lengths[i] = prompt_ids.numel()
+        target_input_lengths[i] = target_inputs.numel()
+        target_label_lengths[i] = target_labels.numel()
 
     return {
         "input_ids": padded_inputs,
         "labels": padded_labels,
         "attention_mask": attention_mask,
+        "prompt_input_ids": padded_prompt_inputs,
+        "prompt_attention_mask": prompt_attention_mask,
+        "prompt_lengths": prompt_lengths,
+        "target_input_ids": padded_target_inputs,
+        "target_input_lengths": target_input_lengths,
+        "target_labels": padded_target_labels,
+        "target_label_lengths": target_label_lengths,
     }
 
 
@@ -168,6 +205,83 @@ def compute_masked_ce_loss(logits: torch.Tensor, labels: torch.Tensor) -> tuple[
         torch.nn.functional.cross_entropy(flat_logits[flat_active], flat_labels[flat_active], reduction="mean"),
         int(flat_active.sum().item()),
     )
+
+
+def clone_past_key_values(past_key_values: Any) -> Any:
+    if past_key_values is None:
+        return None
+    if hasattr(past_key_values, "layers"):
+        cloned = copy.copy(past_key_values)
+        cloned.layers = []
+        for layer in past_key_values.layers:
+            cloned_layer = copy.copy(layer)
+            for key, value in layer.__dict__.items():
+                if torch.is_tensor(value):
+                    setattr(cloned_layer, key, value.clone())
+                else:
+                    setattr(cloned_layer, key, value)
+            cloned.layers.append(cloned_layer)
+        return cloned
+    if all(hasattr(past_key_values, attr) for attr in ("conv_states", "recurrent_states", "key_cache", "value_cache")):
+        cloned = copy.copy(past_key_values)
+        for attr in ("conv_states", "recurrent_states", "key_cache", "value_cache"):
+            values = getattr(past_key_values, attr)
+            setattr(
+                cloned,
+                attr,
+                [value.clone() if torch.is_tensor(value) else value for value in values],
+            )
+        return cloned
+    if hasattr(past_key_values, "to_legacy_cache"):
+        legacy = past_key_values.to_legacy_cache()
+        cloned_legacy = tuple(tuple(t.clone() for t in layer) for layer in legacy)
+        if hasattr(type(past_key_values), "from_legacy_cache"):
+            return type(past_key_values).from_legacy_cache(cloned_legacy)
+        return cloned_legacy
+    if isinstance(past_key_values, tuple):
+        return tuple(
+            tuple(item.clone() if torch.is_tensor(item) else item for item in layer)
+            if isinstance(layer, (tuple, list))
+            else (layer.clone() if torch.is_tensor(layer) else layer)
+            for layer in past_key_values
+        )
+    return copy.deepcopy(past_key_values)
+
+
+def compute_strict_prompt_only_loss(model, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, int, dict[str, Any] | None]:
+    total_loss = None
+    total_targets = 0
+    runtime_stats = None
+    batch_size = int(batch["prompt_input_ids"].shape[0])
+
+    for i in range(batch_size):
+        prompt_len = int(batch["prompt_lengths"][i].item())
+        target_input_len = int(batch["target_input_lengths"][i].item())
+        target_label_len = int(batch["target_label_lengths"][i].item())
+        if prompt_len <= 0 or target_label_len <= 0:
+            continue
+
+        prompt_ids = batch["prompt_input_ids"][i : i + 1, :prompt_len]
+        prompt_attention_mask = batch["prompt_attention_mask"][i : i + 1, :prompt_len]
+        target_inputs = batch["target_input_ids"][i : i + 1, :target_input_len]
+        target_labels = batch["target_labels"][i, :target_label_len]
+
+        prompt_out = model(
+            input_ids=prompt_ids,
+            attention_mask=prompt_attention_mask,
+            use_cache=True,
+        )
+        runtime_stats = get_future_seed_runtime_stats(model)
+        first_target = target_labels[:1]
+        sample_logits = prompt_out.logits[:, -1, :].float()
+        sample_loss = torch.nn.functional.cross_entropy(sample_logits, first_target, reduction="sum")
+        total_loss = sample_loss if total_loss is None else total_loss + sample_loss
+        total_targets += 1
+
+    if total_loss is None or total_targets == 0:
+        device = batch["prompt_input_ids"].device
+        return torch.zeros((), device=device, dtype=torch.float32), 0, runtime_stats
+    return total_loss / total_targets, total_targets, runtime_stats
 
 
 def build_model(args, tokenizer):
@@ -319,6 +433,7 @@ def main() -> None:
     parser.add_argument("--skip-nonfinite-loss", action="store_true")
     parser.add_argument("--grad-clip-norm", type=float, default=0.0)
     parser.add_argument("--fs-alpha-clamp", type=float, default=0.0)
+    parser.add_argument("--strict-prompt-only", action="store_true")
     parser.add_argument("--tiny-hidden-size", type=int, default=32)
     parser.add_argument("--tiny-intermediate-size", type=int, default=64)
     parser.add_argument("--tiny-num-layers", type=int, default=4)
@@ -374,13 +489,16 @@ def main() -> None:
             for _step in range(args.max_steps):
                 batch = next(batches)
                 batch = {k: v.to(device) for k, v in batch.items()}
-                out = model(
-                    input_ids=batch["input_ids"],
-                    attention_mask=batch["attention_mask"],
-                    use_cache=False,
-                )
-                loss, active_targets = compute_masked_ce_loss(out.logits, batch["labels"])
-                train_runtime = get_future_seed_runtime_stats(model)
+                if args.strict_prompt_only:
+                    loss, active_targets, train_runtime = compute_strict_prompt_only_loss(model, batch)
+                else:
+                    out = model(
+                        input_ids=batch["input_ids"],
+                        attention_mask=batch["attention_mask"],
+                        use_cache=False,
+                    )
+                    loss, active_targets = compute_masked_ce_loss(out.logits, batch["labels"])
+                    train_runtime = get_future_seed_runtime_stats(model)
                 if active_targets == 0:
                     skipped_empty_targets += 1
                     loss_trace.append(
@@ -507,6 +625,7 @@ def main() -> None:
             "seed_clip_value": args.seed_clip_value,
             "optimize_in_eval_mode": bool(args.optimize_in_eval_mode),
             "skip_nonfinite_loss": bool(args.skip_nonfinite_loss),
+            "strict_prompt_only": bool(args.strict_prompt_only),
             "grad_clip_norm": args.grad_clip_norm,
             "fs_alpha_clamp": args.fs_alpha_clamp,
             "loss_start": losses[0] if losses else None,
