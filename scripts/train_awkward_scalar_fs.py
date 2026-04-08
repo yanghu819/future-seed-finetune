@@ -75,6 +75,21 @@ def collate_batch(rows, tokenizer, max_length: int):
     }
 
 
+def normalize_answer(text: str) -> str:
+    return " ".join(text.strip().split()).lower()
+
+
+def extract_prediction(decoded: str, target: str) -> str:
+    target_norm = normalize_answer(target)
+    if re.fullmatch(r"\d+", target_norm):
+        match = re.search(r"\d+", decoded)
+        return match.group(0) if match else ""
+    if re.fullmatch(r"[A-Za-z0-9_]+", target_norm):
+        match = re.search(r"[A-Za-z0-9_]+", decoded)
+        return match.group(0).lower() if match else ""
+    return normalize_answer(decoded)
+
+
 def build_model(args, tokenizer):
     install_qwen35_upstream_compat_fixes()
     with contextlib.redirect_stdout(sys.stderr):
@@ -160,7 +175,15 @@ def build_model(args, tokenizer):
     return model, fs_cfg, trainable
 
 
-def evaluate(model, tokenizer, rows, device, max_length: int, limit: int | None = None) -> dict[str, float]:
+def evaluate(
+    model,
+    tokenizer,
+    rows,
+    device,
+    max_length: int,
+    limit: int | None = None,
+    eval_max_new_tokens: int = 8,
+) -> dict[str, float]:
     model.eval()
     correct = 0
     eval_rows = rows[:limit] if limit is not None and limit > 0 else rows
@@ -170,7 +193,7 @@ def evaluate(model, tokenizer, rows, device, max_length: int, limit: int | None 
         with torch.no_grad():
             out = model.generate(
                 **encoded,
-                max_new_tokens=3,
+                max_new_tokens=eval_max_new_tokens,
                 do_sample=False,
                 use_cache=True,
                 pad_token_id=tokenizer.pad_token_id,
@@ -178,9 +201,8 @@ def evaluate(model, tokenizer, rows, device, max_length: int, limit: int | None 
             )
         new_tokens = out[0, encoded["input_ids"].shape[1] :]
         decoded = tokenizer.decode(new_tokens, skip_special_tokens=True)
-        match = re.search(r"\d", decoded)
-        pred = match.group(0) if match else ""
-        correct += int(pred == row["target"])
+        pred = extract_prediction(decoded, row["target"])
+        correct += int(normalize_answer(pred) == normalize_answer(row["target"]))
     return {"exact_match": correct / max(1, len(eval_rows)), "num_examples": len(eval_rows)}
 
 
@@ -203,6 +225,8 @@ def main() -> None:
     parser.add_argument("--load-dtype", choices=["float32", "bfloat16", "float16"], default="float32")
     parser.add_argument("--low-cpu-mem-usage", action="store_true")
     parser.add_argument("--eval-limit", type=int, default=0)
+    parser.add_argument("--eval-max-new-tokens", type=int, default=8)
+    parser.add_argument("--optimize-in-eval-mode", action="store_true")
     parser.add_argument("--skip-nonfinite-loss", action="store_true")
     parser.add_argument("--grad-clip-norm", type=float, default=0.0)
     parser.add_argument("--fs-alpha-clamp", type=float, default=0.0)
@@ -249,7 +273,10 @@ def main() -> None:
         skipped_nonfinite_losses = 0
         skipped_nonfinite_grads = 0
         last_grad_norm = None
-        model.train()
+        if args.optimize_in_eval_mode:
+            model.eval()
+        else:
+            model.train()
         effective_steps = 0
         if optimizer is not None and args.max_steps > 0:
             optimizer.zero_grad(set_to_none=True)
@@ -291,8 +318,24 @@ def main() -> None:
                 effective_steps += 1
 
         eval_limit = args.eval_limit if args.eval_limit > 0 else None
-        awkward_metrics = evaluate(model, tokenizer, valid_awkward.rows, device, args.max_length, eval_limit)
-        friendly_metrics = evaluate(model, tokenizer, valid_friendly.rows, device, args.max_length, eval_limit)
+        awkward_metrics = evaluate(
+            model,
+            tokenizer,
+            valid_awkward.rows,
+            device,
+            args.max_length,
+            eval_limit,
+            args.eval_max_new_tokens,
+        )
+        friendly_metrics = evaluate(
+            model,
+            tokenizer,
+            valid_friendly.rows,
+            device,
+            args.max_length,
+            eval_limit,
+            args.eval_max_new_tokens,
+        )
         eval_runtime = get_future_seed_runtime_stats(model)
 
         output_dir = Path(args.output_dir)
@@ -313,6 +356,7 @@ def main() -> None:
             "batch_size": args.batch_size,
             "learning_rate": args.lr,
             "seed_clip_value": args.seed_clip_value,
+            "optimize_in_eval_mode": bool(args.optimize_in_eval_mode),
             "skip_nonfinite_loss": bool(args.skip_nonfinite_loss),
             "grad_clip_norm": args.grad_clip_norm,
             "fs_alpha_clamp": args.fs_alpha_clamp,
@@ -334,6 +378,7 @@ def main() -> None:
             "load_dtype": args.load_dtype if args.model_backend == "pretrained" else None,
             "low_cpu_mem_usage": bool(args.low_cpu_mem_usage) if args.model_backend == "pretrained" else None,
             "eval_limit": args.eval_limit,
+            "eval_max_new_tokens": args.eval_max_new_tokens,
         }
     print(json.dumps(result, indent=2, sort_keys=True))
 

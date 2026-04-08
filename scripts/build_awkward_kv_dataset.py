@@ -8,6 +8,34 @@ from pathlib import Path
 
 PEOPLE = [f"person_{i:02d}" for i in range(32)]
 TOKENS = [f"token_{i:02d}" for i in range(64)]
+FILLER_WORDS = [
+    "amber",
+    "bridge",
+    "cobalt",
+    "drift",
+    "ember",
+    "field",
+    "glow",
+    "harbor",
+    "ivory",
+    "jungle",
+    "kepler",
+    "lantern",
+    "meadow",
+    "north",
+    "onyx",
+    "prairie",
+    "quartz",
+    "river",
+    "signal",
+    "thunder",
+    "uplink",
+    "violet",
+    "willow",
+    "xenon",
+    "yellow",
+    "zenith",
+]
 
 
 def make_record_simple(rng: random.Random, order_type: str, n_facts: int = 8) -> dict[str, str]:
@@ -92,11 +120,51 @@ def make_record_multihop_sum(rng: random.Random, order_type: str, n_people: int 
     }
 
 
+def make_record_niah_passkey(rng: random.Random, order_type: str, haystack_lines: int = 96) -> dict[str, str]:
+    passkey = f"{rng.randrange(100000):05d}"
+    filler = []
+    for idx in range(haystack_lines):
+        word_a, word_b, word_c = rng.sample(FILLER_WORDS, 3)
+        filler.append(f"note_{idx:03d}: {word_a} {word_b} {word_c}.")
+    insert_at = rng.randrange(len(filler) + 1)
+    filler.insert(insert_at, f"security memo: the pass key is {passkey}.")
+    notes = "\n".join(filler)
+    task = "Answer with exactly the 5-digit pass key."
+    question = "What is the pass key hidden in the notes?"
+
+    if order_type == "friendly":
+        prompt = (
+            f"Task: {task}\n\n"
+            f"Notes:\n{notes}\n\n"
+            f"Question: {question}\n"
+            f"Answer: "
+        )
+    elif order_type == "awkward":
+        prompt = (
+            f"Task: {task}\n\n"
+            f"Question first: {question}\n\n"
+            f"You must search the notes to find the exact 5-digit pass key.\n"
+            f"Notes:\n{notes}\n\n"
+            f"Answer: "
+        )
+    else:
+        raise ValueError(f"unknown order_type={order_type}")
+
+    return {
+        "order_type": order_type,
+        "variant": "niah_passkey",
+        "prompt": prompt,
+        "target": passkey,
+    }
+
+
 def make_record(rng: random.Random, order_type: str, variant: str) -> dict[str, str]:
     if variant == "simple_lookup":
         return make_record_simple(rng, order_type)
     if variant == "multihop_sum":
         return make_record_multihop_sum(rng, order_type)
+    if variant == "niah_passkey":
+        return make_record_niah_passkey(rng, order_type)
     raise ValueError(f"unknown variant={variant}")
 
 
@@ -113,7 +181,7 @@ def main() -> None:
     parser.add_argument("--train-size", type=int, default=256)
     parser.add_argument("--valid-size", type=int, default=64)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--variant", choices=["simple_lookup", "multihop_sum"], default="simple_lookup")
+    parser.add_argument("--variant", choices=["simple_lookup", "multihop_sum", "niah_passkey"], default="simple_lookup")
     args = parser.parse_args()
 
     out = Path(args.output_dir)
