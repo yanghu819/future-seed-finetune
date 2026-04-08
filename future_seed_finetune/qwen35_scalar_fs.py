@@ -35,6 +35,7 @@ class ScalarFutureSeedConfig:
 class FutureSeedRuntime:
     active: bool
     config: ScalarFutureSeedConfig
+    prompt_length: int | None = None
     injection_count: int = 0
     captured_layers: list[int] | None = None
     injected_layers: list[int] | None = None
@@ -51,6 +52,7 @@ class FutureSeedRuntime:
         return {
             "active": self.active,
             "config": asdict(self.config),
+            "prompt_length": self.prompt_length,
             "injection_count": self.injection_count,
             "captured_layers": list(self.captured_layers or []),
             "injected_layers": list(self.injected_layers or []),
@@ -280,7 +282,8 @@ def install_qwen35_scalar_fs_patch() -> None:
             seq_len = inputs_embeds.shape[1]
 
         active = seq_len is not None and (not fs_cfg.prompt_only or seq_len > 1)
-        runtime = FutureSeedRuntime(active=bool(active), config=fs_cfg)
+        prompt_length = getattr(self, "_future_seed_prompt_length_override", None)
+        runtime = FutureSeedRuntime(active=bool(active), config=fs_cfg, prompt_length=prompt_length)
         token = _RUNTIME.set(runtime)
         try:
             outputs = original_text_model_forward(self, *args, **kwargs)
@@ -302,6 +305,8 @@ def install_qwen35_scalar_fs_patch() -> None:
         fs_selected = bool(getattr(self, "_future_seed_selected", False))
         fs_active = bool(fs_cfg and fs_selected and seq_len > 1)
         incoming_seed = getattr(self, "_future_seed_initial_state_override", None)
+        runtime = _RUNTIME.get()
+        runtime_prompt_len = getattr(runtime, "prompt_length", None) if runtime is not None else None
 
         mixed_qkv = self.in_proj_qkv(hidden_states).transpose(1, 2)
         z_hidden = self.in_proj_z(hidden_states)
@@ -352,16 +357,42 @@ def install_qwen35_scalar_fs_patch() -> None:
             prepared_seed = _apply_seed_projector(prepared_seed, hidden_states, self, fs_cfg)
 
         if not use_precomputed_states:
-            core_attn_out, last_recurrent_state = self.chunk_gated_delta_rule(
-                query,
-                key,
-                value,
-                g=g,
-                beta=beta,
-                initial_state=prepared_seed,
-                output_final_state=(cache_params is not None) or fs_active,
-                use_qk_l2norm_in_kernel=True,
-            )
+            if fs_active and runtime_prompt_len is not None and 0 < int(runtime_prompt_len) < seq_len:
+                prompt_len = int(runtime_prompt_len)
+                prompt_attn_out, prompt_final_state = self.chunk_gated_delta_rule(
+                    query[:, :prompt_len],
+                    key[:, :prompt_len],
+                    value[:, :prompt_len],
+                    g=g[:, :prompt_len],
+                    beta=beta[:, :prompt_len],
+                    initial_state=prepared_seed,
+                    output_final_state=True,
+                    use_qk_l2norm_in_kernel=True,
+                )
+                answer_attn_out, last_recurrent_state = self.chunk_gated_delta_rule(
+                    query[:, prompt_len:],
+                    key[:, prompt_len:],
+                    value[:, prompt_len:],
+                    g=g[:, prompt_len:],
+                    beta=beta[:, prompt_len:],
+                    initial_state=prompt_final_state,
+                    output_final_state=(cache_params is not None) or fs_active,
+                    use_qk_l2norm_in_kernel=True,
+                )
+                core_attn_out = torch.cat([prompt_attn_out, answer_attn_out], dim=1)
+                seed_recurrent_state = prompt_final_state
+            else:
+                core_attn_out, last_recurrent_state = self.chunk_gated_delta_rule(
+                    query,
+                    key,
+                    value,
+                    g=g,
+                    beta=beta,
+                    initial_state=prepared_seed,
+                    output_final_state=(cache_params is not None) or fs_active,
+                    use_qk_l2norm_in_kernel=True,
+                )
+                seed_recurrent_state = last_recurrent_state
         else:
             core_attn_out, last_recurrent_state = self.recurrent_gated_delta_rule(
                 query,
@@ -373,11 +404,12 @@ def install_qwen35_scalar_fs_patch() -> None:
                 output_final_state=cache_params is not None,
                 use_qk_l2norm_in_kernel=True,
             )
+            seed_recurrent_state = last_recurrent_state
 
         if cache_params is not None:
             cache_params.update_recurrent_state(last_recurrent_state, self.layer_idx)
 
-        self._future_seed_last_recurrent_state = last_recurrent_state if fs_active else None
+        self._future_seed_last_recurrent_state = seed_recurrent_state if fs_active else None
         self._future_seed_used_input_state = prepared_seed is not None
 
         core_attn_out = core_attn_out.reshape(-1, self.head_v_dim)

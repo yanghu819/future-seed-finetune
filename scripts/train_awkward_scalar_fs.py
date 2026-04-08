@@ -248,35 +248,60 @@ def clone_past_key_values(past_key_values: Any) -> Any:
     return copy.deepcopy(past_key_values)
 
 
+def get_text_backbone(model):
+    if hasattr(model, "language_model"):
+        return model.language_model
+    core = getattr(model, "model", None)
+    if core is not None and hasattr(core, "language_model"):
+        return core.language_model
+    return getattr(model, "model", model)
+
+
 def compute_strict_prompt_only_loss(model, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, int, dict[str, Any] | None]:
     total_loss = None
     total_targets = 0
     runtime_stats = None
     batch_size = int(batch["prompt_input_ids"].shape[0])
+    backbone = get_text_backbone(model)
 
     for i in range(batch_size):
         prompt_len = int(batch["prompt_lengths"][i].item())
-        target_input_len = int(batch["target_input_lengths"][i].item())
         target_label_len = int(batch["target_label_lengths"][i].item())
         if prompt_len <= 0 or target_label_len <= 0:
             continue
 
         prompt_ids = batch["prompt_input_ids"][i : i + 1, :prompt_len]
-        prompt_attention_mask = batch["prompt_attention_mask"][i : i + 1, :prompt_len]
+        target_input_len = int(batch["target_input_lengths"][i].item())
         target_inputs = batch["target_input_ids"][i : i + 1, :target_input_len]
         target_labels = batch["target_labels"][i, :target_label_len]
 
-        prompt_out = model(
-            input_ids=prompt_ids,
-            attention_mask=prompt_attention_mask,
-            use_cache=True,
-        )
-        runtime_stats = get_future_seed_runtime_stats(model)
-        first_target = target_labels[:1]
-        sample_logits = prompt_out.logits[:, -1, :].float()
-        sample_loss = torch.nn.functional.cross_entropy(sample_logits, first_target, reduction="sum")
+        sample_loss = None
+        sample_targets = 0
+        setattr(backbone, "_future_seed_prompt_length_override", prompt_len)
+        try:
+            for target_pos in range(target_label_len):
+                prefix_len = min(target_pos, target_input_len)
+                if prefix_len > 0:
+                    seq_ids = torch.cat([prompt_ids, target_inputs[:, :prefix_len]], dim=1)
+                else:
+                    seq_ids = prompt_ids
+                seq_attention_mask = torch.ones_like(seq_ids)
+                out = model(
+                    input_ids=seq_ids,
+                    attention_mask=seq_attention_mask,
+                    use_cache=False,
+                )
+                runtime_stats = get_future_seed_runtime_stats(model)
+                step_target = target_labels[target_pos : target_pos + 1]
+                step_logits = out.logits[:, -1, :].float()
+                step_loss = torch.nn.functional.cross_entropy(step_logits, step_target, reduction="sum")
+                sample_loss = step_loss if sample_loss is None else sample_loss + step_loss
+                sample_targets += 1
+        finally:
+            setattr(backbone, "_future_seed_prompt_length_override", None)
+
         total_loss = sample_loss if total_loss is None else total_loss + sample_loss
-        total_targets += 1
+        total_targets += sample_targets
 
     if total_loss is None or total_targets == 0:
         device = batch["prompt_input_ids"].device
