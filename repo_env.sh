@@ -15,6 +15,7 @@ export TOKENIZERS_CACHE="${HF_HOME}/tokenizers"
 export TORCH_HOME="${REPO_CACHE_ROOT}/torch"
 export PIP_CACHE_DIR="${REPO_CACHE_ROOT}/pip"
 export UV_INSTALL_DIR="${ROOT_DIR}/artifacts/tools/uv"
+export UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT:-300}"
 export PATH="${UV_INSTALL_DIR}:${PATH}"
 
 mkdir -p \

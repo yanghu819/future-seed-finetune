@@ -9,4 +9,4 @@ if [[ ! -x "${UV_INSTALL_DIR}/uv" ]]; then
   curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="${UV_INSTALL_DIR}" sh
 fi
 
-uv sync
+uv sync --locked
