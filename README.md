@@ -11,6 +11,7 @@ Current scope:
 - smoke run on a tiny randomly initialized `qwen3_5` model
 - awkward-task tiny SFT smoke with `baseline` vs `scalar-FS` switches
 - pretrained `Qwen3.5-0.8B` remote smoke on GPU with repo-root caches only
+- remote full-validation comparison for deep-layer scalar-FS vs frozen control on `Qwen3.5-0.8B`
 
 The first goal is not end-task quality. It is to verify that:
 
@@ -84,17 +85,27 @@ RUN_MODE=train-pretrained FS_MODE=disabled LOAD_DTYPE=bfloat16 LOW_CPU_MEM_USAGE
 - At this stage both tiny runs land at the same exact-match (`0.0625` awkward / `0.0625` friendly). This is still a pipeline validation result, not a task-improvement claim.
 - Low-memory pretrained loading flags are now wired in (`LOAD_DTYPE`, `LOW_CPU_MEM_USAGE`, `EVAL_LIMIT`), but a local `Qwen/Qwen3.5-0.8B` forward on this 16GB CPU machine still exited with `137`. Real pretrained runs should be moved to a higher-memory or GPU machine.
 - Remote GPU runs now succeed end-to-end on `Qwen/Qwen3.5-0.8B`:
-  - pretrained validate with scalar-FS: `runs/qwen35-0p8b-validate-pretrained-bf16-remote-rerun2-20260407T124255Z`
-  - 1-step pretrained smoke with scalar-FS: `runs/qwen35-0p8b-train-pretrained-smoke-rerun2-20260407T124305Z`
-  - frozen disabled control: `runs/qwen35-0p8b-train-pretrained-baseline-control-rerun3-20260407T125253Z`
-- The remote scalar-FS run confirms real cross-layer seed activity on pretrained weights:
-  - `device = cuda`
-  - `train_runtime.injection_count = 11`
-  - `trainable_parameter_count = 17`
-- The current blocker is checkpoint/model mismatch, not pipeline breakage:
-  - both scalar-FS and frozen disabled control land at `0.0` exact-match on the small awkward/friendly eval splits
-  - loading reports show repeated `UNEXPECTED` and `MISSING` weights between the downloaded `0.8B` checkpoint and the current `transformers` `qwen3_5` module layout
-  - this means the present `0.8B` run should be treated as a pretrained smoke, not as a meaningful quality comparison yet
+- The `0.8B` loading mismatch is fixed:
+  - the correct runtime path is `Qwen3_5ForConditionalGeneration`, with Future-Seed attached only to `model.language_model`
+  - the current code no longer shows the large `UNEXPECTED` / `MISSING` weight groups from the earlier text-only loading path
+- Small remote pretrained runs on the fixed path now work:
+  - validate: `runs/qwen35-0p8b-validate-pretrained-bf16-remote-rerun4-20260407T131510Z`
+  - shallow FS 1-step smoke: `runs/qwen35-0p8b-train-pretrained-smoke-rerun4-20260407T131510Z`
+  - deep-layer FS 1-step smoke: `runs/qwen35-0p8b-train-pretrained-smoke-rerun5-20260407T132258Z`
+  - matching frozen control: `runs/qwen35-0p8b-train-pretrained-baseline-control-rerun4-20260407T131628Z`
+- The important modeling lesson is that shallow FS is harmful here, while deep-layer FS is stable:
+  - shallow FS from early layers: `awkward = 0.125`, `friendly = 0.0`
+  - deep-layer FS from the last 8 layers: `awkward = 1.0`, `friendly = 1.0`
+  - frozen disabled control: `awkward = 1.0`, `friendly = 1.0`
+- Full validation on 64 awkward + 64 friendly examples is now complete:
+  - deep-layer FS: `runs/qwen35-0p8b-train-pretrained-deepfs-fullval-rerun6-20260408T011643Z`
+  - frozen disabled control: `runs/qwen35-0p8b-train-pretrained-baseline-fullval-rerun6-20260408T011643Z`
+  - deep-layer FS reaches `awkward = 1.0`, `friendly = 0.984375`
+  - frozen disabled control reaches `awkward = 1.0`, `friendly = 1.0`
+- Current conclusion:
+  - the Future-Seed deep-layer scalar adapter is technically valid on real pretrained Qwen3.5 weights
+  - on this synthetic awkward task, it does not beat the frozen baseline
+  - so the current repo is a working research scaffold, not yet a positive quality result
 
 ## Notes
 
