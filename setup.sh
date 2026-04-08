@@ -13,7 +13,7 @@ fi
 
 if [[ ! -x "${UV_INSTALL_DIR}/uv" || "${CURRENT_UV_VERSION}" != "${REQUIRED_UV_VERSION}" ]]; then
   rm -f "${UV_INSTALL_DIR}/uv"
-  curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="${UV_INSTALL_DIR}" sh -s -- --version "${REQUIRED_UV_VERSION}"
+  curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="${UV_INSTALL_DIR}" sh
 fi
 
 uv sync --locked
