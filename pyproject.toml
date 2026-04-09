@@ -11,6 +11,7 @@ dependencies = [
   "datasets==3.6.0",
   "protobuf==6.32.1",
   "sentencepiece==0.2.1",
+  "tiktoken==0.12.0",
   "transformers @ https://github.com/huggingface/transformers/archive/b9f0fbf532c124ff836466d896a716e26dbe4722.tar.gz",
 ]
 
