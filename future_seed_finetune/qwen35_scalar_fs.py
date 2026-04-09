@@ -29,6 +29,8 @@ class ScalarFutureSeedConfig:
     projection_lora_rank: int = 0
     projection_lora_alpha: float = 1.0
     projection_lora_targets: str = "both"
+    seed_gate_max_scale: float = 0.25
+    train_injected_only: bool = False
     reset_on_full_attention: bool = True
 
 
@@ -153,7 +155,8 @@ def _prepare_seed(seed: torch.Tensor | None, module: nn.Module, cfg: ScalarFutur
         rms = out.pow(2).mean(dim=reduce_dims, keepdim=True).sqrt().clamp_min(1e-6)
         out = out / rms
 
-    out = out * module.fs_alpha.float()
+    gate = torch.sigmoid(module.fs_alpha.float()) * float(cfg.seed_gate_max_scale)
+    out = out * gate
 
     if cfg.clip_value is not None:
         out = out.clamp(min=-cfg.clip_value, max=cfg.clip_value)
@@ -215,6 +218,26 @@ def _projection_target_enabled(prefix: str, cfg: ScalarFutureSeedConfig) -> bool
     if targets == "both":
         return prefix in {"z", "out"}
     return prefix == targets
+
+
+def _future_seed_trainable_selected(backbone: nn.Module, cfg: ScalarFutureSeedConfig) -> set[int]:
+    trainable: set[int] = set()
+    previous_selected = False
+    for idx, layer in enumerate(backbone.layers):
+        layer_type = getattr(layer, "layer_type", None)
+        if layer_type == "full_attention" and cfg.reset_on_full_attention:
+            previous_selected = False
+            continue
+        if layer_type != "linear_attention":
+            continue
+        selected = bool(getattr(layer.linear_attn, "_future_seed_selected", False))
+        if not selected:
+            previous_selected = False
+            continue
+        if previous_selected:
+            trainable.add(idx)
+        previous_selected = True
+    return trainable
 
 
 def install_qwen35_upstream_compat_fixes() -> None:
@@ -487,15 +510,19 @@ def apply_scalar_future_seed(model: nn.Module, cfg: ScalarFutureSeedConfig) -> n
     for idx, layer in enumerate(backbone.layers):
         if getattr(layer, "layer_type", None) == "linear_attention" and idx >= cfg.start_layer:
             if not hasattr(layer.linear_attn, "fs_alpha"):
+                init_value = float(cfg.alpha_init)
+                max_scale = max(float(cfg.seed_gate_max_scale), 1e-6)
+                init_ratio = min(max(init_value / max_scale, 1e-4), 1.0 - 1e-4)
+                init_logit = torch.logit(
+                    torch.tensor(
+                        init_ratio,
+                        dtype=torch.float32,
+                        device=layer.linear_attn.out_proj.weight.device,
+                    )
+                )
                 layer.linear_attn.register_parameter(
                     "fs_alpha",
-                    nn.Parameter(
-                        torch.tensor(
-                            float(cfg.alpha_init),
-                            dtype=torch.float32,
-                            device=layer.linear_attn.out_proj.weight.device,
-                        )
-                    ),
+                    nn.Parameter(init_logit),
                 )
             if cfg.enable_delta_adapter and not hasattr(layer.linear_attn, "delta_gain"):
                 hidden_size = int(layer.linear_attn.out_proj.out_features)
@@ -628,13 +655,22 @@ def apply_scalar_future_seed(model: nn.Module, cfg: ScalarFutureSeedConfig) -> n
             layer.linear_attn._future_seed_config = cfg
             layer.linear_attn._future_seed_selected = False
 
+    trainable_selected = _future_seed_trainable_selected(backbone, cfg)
+    backbone._future_seed_trainable_selected = sorted(trainable_selected)
+    for idx, layer in enumerate(backbone.layers):
+        if getattr(layer, "layer_type", None) == "linear_attention":
+            layer.linear_attn._future_seed_trainable = (idx in trainable_selected) if cfg.train_injected_only else bool(
+                getattr(layer.linear_attn, "_future_seed_selected", False)
+            )
+
     return model
 
 
 def freeze_except_future_seed(model: nn.Module) -> list[str]:
     trainable: list[str] = []
+    text_backbone = _get_text_backbone(model)
     for name, param in model.named_parameters():
-        param.requires_grad = (
+        suffix_match = (
             name.endswith("fs_alpha")
             or name.endswith("delta_gain")
             or name.endswith("delta_bias")
@@ -647,6 +683,20 @@ def freeze_except_future_seed(model: nn.Module) -> list[str]:
             or name.endswith("out_lora_A")
             or name.endswith("out_lora_B")
         )
+        if not suffix_match:
+            param.requires_grad = False
+            continue
+
+        parts = name.split(".")
+        if "layers" in parts and "linear_attn" in parts:
+            try:
+                layer_idx = int(parts[parts.index("layers") + 1])
+                layer = text_backbone.layers[layer_idx]
+                param.requires_grad = bool(getattr(layer.linear_attn, "_future_seed_trainable", False))
+            except (ValueError, IndexError):
+                param.requires_grad = False
+        else:
+            param.requires_grad = False
         if param.requires_grad:
             trainable.append(name)
     return trainable

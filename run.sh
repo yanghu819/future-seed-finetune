@@ -114,8 +114,10 @@ SEED_PROJECTOR_RANK="${SEED_PROJECTOR_RANK:-0}"
 PROJECTION_LORA_RANK="${PROJECTION_LORA_RANK:-0}"
 PROJECTION_LORA_ALPHA="${PROJECTION_LORA_ALPHA:-1.0}"
 PROJECTION_LORA_TARGETS="${PROJECTION_LORA_TARGETS:-both}"
+SEED_GATE_MAX_SCALE="${SEED_GATE_MAX_SCALE:-0.25}"
 GRAD_CLIP_NORM="${GRAD_CLIP_NORM:-0.0}"
 GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}"
+GRAD_ACCUM_TARGET_TOKENS="${GRAD_ACCUM_TARGET_TOKENS:-0}"
 FS_ALPHA_CLAMP="${FS_ALPHA_CLAMP:-0.0}"
 SKIP_NONFINITE_LOSS="${SKIP_NONFINITE_LOSS:-0}"
 OPTIMIZE_IN_EVAL_MODE="${OPTIMIZE_IN_EVAL_MODE:-0}"
@@ -156,8 +158,10 @@ elif [[ "${RUN_MODE}" == "train-smoke" ]]; then
     --projection-lora-rank "${PROJECTION_LORA_RANK}" \
     --projection-lora-alpha "${PROJECTION_LORA_ALPHA}" \
     --projection-lora-targets "${PROJECTION_LORA_TARGETS}" \
+    --seed-gate-max-scale "${SEED_GATE_MAX_SCALE}" \
     --grad-clip-norm "${GRAD_CLIP_NORM}" \
     --grad-accum-steps "${GRAD_ACCUM_STEPS}" \
+    --grad-accum-target-tokens "${GRAD_ACCUM_TARGET_TOKENS}" \
     --fs-alpha-clamp "${FS_ALPHA_CLAMP}" \
     --eval-max-new-tokens "${EVAL_MAX_NEW_TOKENS}")
   if [[ "${UNFREEZE_BACKBONE:-1}" == "1" ]]; then
@@ -177,6 +181,9 @@ elif [[ "${RUN_MODE}" == "train-smoke" ]]; then
   fi
   if [[ "${STRICT_PROMPT_ONLY}" == "1" ]]; then
     TRAIN_CMD+=(--strict-prompt-only)
+  fi
+  if [[ "${TRAIN_INJECTED_ONLY:-0}" == "1" ]]; then
+    TRAIN_CMD+=(--train-injected-only)
   fi
   "${TRAIN_CMD[@]}" > "${RESULT_FILE}" 2> "${ERROR_LOG}"
   EXIT_CODE=$?
@@ -198,8 +205,10 @@ elif [[ "${RUN_MODE}" == "train-pretrained" ]]; then
     --projection-lora-rank "${PROJECTION_LORA_RANK}" \
     --projection-lora-alpha "${PROJECTION_LORA_ALPHA}" \
     --projection-lora-targets "${PROJECTION_LORA_TARGETS}" \
+    --seed-gate-max-scale "${SEED_GATE_MAX_SCALE}" \
     --grad-clip-norm "${GRAD_CLIP_NORM}" \
     --grad-accum-steps "${GRAD_ACCUM_STEPS}" \
+    --grad-accum-target-tokens "${GRAD_ACCUM_TARGET_TOKENS}" \
     --fs-alpha-clamp "${FS_ALPHA_CLAMP}" \
     --load-dtype "${LOAD_DTYPE}" \
     --eval-limit "${EVAL_LIMIT}" \
@@ -224,6 +233,9 @@ elif [[ "${RUN_MODE}" == "train-pretrained" ]]; then
   fi
   if [[ "${STRICT_PROMPT_ONLY}" == "1" ]]; then
     TRAIN_CMD+=(--strict-prompt-only)
+  fi
+  if [[ "${TRAIN_INJECTED_ONLY:-0}" == "1" ]]; then
+    TRAIN_CMD+=(--train-injected-only)
   fi
   "${TRAIN_CMD[@]}" > "${RESULT_FILE}" 2> "${ERROR_LOG}"
   EXIT_CODE=$?

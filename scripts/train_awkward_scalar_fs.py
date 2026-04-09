@@ -202,7 +202,7 @@ def compute_masked_ce_loss(logits: torch.Tensor, labels: torch.Tensor) -> tuple[
     flat_labels = shift_labels.view(-1)
     flat_active = active.view(-1)
     return (
-        torch.nn.functional.cross_entropy(flat_logits[flat_active], flat_labels[flat_active], reduction="mean"),
+        torch.nn.functional.cross_entropy(flat_logits[flat_active], flat_labels[flat_active], reduction="sum"),
         int(flat_active.sum().item()),
     )
 
@@ -306,7 +306,7 @@ def compute_strict_prompt_only_loss(model, batch: dict[str, torch.Tensor]) -> tu
     if total_loss is None or total_targets == 0:
         device = batch["prompt_input_ids"].device
         return torch.zeros((), device=device, dtype=torch.float32), 0, runtime_stats
-    return total_loss / total_targets, total_targets, runtime_stats
+    return total_loss, total_targets, runtime_stats
 
 
 def build_model(args, tokenizer):
@@ -379,6 +379,8 @@ def build_model(args, tokenizer):
             projection_lora_rank=args.projection_lora_rank,
             projection_lora_alpha=args.projection_lora_alpha,
             projection_lora_targets=args.projection_lora_targets,
+            seed_gate_max_scale=args.seed_gate_max_scale,
+            train_injected_only=args.train_injected_only,
             reset_on_full_attention=True,
         )
         apply_scalar_future_seed(model, fs_cfg)
@@ -454,10 +456,12 @@ def main() -> None:
     parser.add_argument("--projection-lora-rank", type=int, default=0)
     parser.add_argument("--projection-lora-alpha", type=float, default=1.0)
     parser.add_argument("--projection-lora-targets", choices=["z", "out", "both"], default="both")
+    parser.add_argument("--seed-gate-max-scale", type=float, default=0.25)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--unfreeze-backbone", action="store_true")
     parser.add_argument("--disable-future-seed", action="store_true")
     parser.add_argument("--enable-delta-adapter", action="store_true")
+    parser.add_argument("--train-injected-only", action="store_true")
     parser.add_argument("--load-dtype", choices=["float32", "bfloat16", "float16"], default="float32")
     parser.add_argument("--low-cpu-mem-usage", action="store_true")
     parser.add_argument("--eval-limit", type=int, default=0)
@@ -466,6 +470,7 @@ def main() -> None:
     parser.add_argument("--skip-nonfinite-loss", action="store_true")
     parser.add_argument("--grad-clip-norm", type=float, default=0.0)
     parser.add_argument("--grad-accum-steps", type=int, default=1)
+    parser.add_argument("--grad-accum-target-tokens", type=int, default=0)
     parser.add_argument("--fs-alpha-clamp", type=float, default=0.0)
     parser.add_argument("--strict-prompt-only", action="store_true")
     parser.add_argument("--tiny-hidden-size", type=int, default=32)
@@ -522,6 +527,7 @@ def main() -> None:
             optimizer.zero_grad(set_to_none=True)
             accum_steps = max(1, int(args.grad_accum_steps))
             micro_since_step = 0
+            accumulated_targets = 0
             for _step in range(args.max_steps):
                 batch = next(batches)
                 batch = {k: v.to(device) for k, v in batch.items()}
@@ -550,6 +556,7 @@ def main() -> None:
                     optimizer.zero_grad(set_to_none=True)
                     micro_since_step = 0
                     continue
+                display_loss = float((loss / max(1, active_targets)).detach().float().cpu().item())
                 if not torch.isfinite(loss):
                     skipped_nonfinite_losses += 1
                     loss_trace.append(
@@ -557,7 +564,7 @@ def main() -> None:
                             "step": len(loss_trace),
                             "status": "skipped_nonfinite_loss",
                             "active_targets": active_targets,
-                            "loss": float(loss.detach().float().cpu().item()) if loss.numel() == 1 else None,
+                            "loss": display_loss,
                             "grad_norm": None,
                             "injection_count": (train_runtime or {}).get("injection_count", 0),
                         }
@@ -567,12 +574,20 @@ def main() -> None:
                     if args.skip_nonfinite_loss:
                         continue
                     raise RuntimeError(f"non-finite loss encountered: {loss.item()}")
-                (loss / accum_steps).backward()
+                loss.backward()
                 micro_since_step += 1
-                should_step = micro_since_step >= accum_steps or _step == args.max_steps - 1
+                accumulated_targets += active_targets
+                if args.grad_accum_target_tokens > 0:
+                    should_step = accumulated_targets >= int(args.grad_accum_target_tokens) or _step == args.max_steps - 1
+                else:
+                    should_step = micro_since_step >= accum_steps or _step == args.max_steps - 1
                 grad_invalid = False
                 status = "accumulated"
                 if should_step:
+                    target_norm = max(1, accumulated_targets)
+                    for param in params:
+                        if param.grad is not None:
+                            param.grad.div_(float(target_norm))
                     if args.grad_clip_norm > 0:
                         grad_norm = torch.nn.utils.clip_grad_norm_(params, args.grad_clip_norm)
                         last_grad_norm = float(grad_norm.detach().float().cpu().item())
@@ -596,6 +611,7 @@ def main() -> None:
                         )
                         optimizer.zero_grad(set_to_none=True)
                         micro_since_step = 0
+                        accumulated_targets = 0
                         continue
                     optimizer.step()
                     if args.fs_alpha_clamp > 0:
@@ -605,15 +621,16 @@ def main() -> None:
                                     param.clamp_(-args.fs_alpha_clamp, args.fs_alpha_clamp)
                     optimizer.zero_grad(set_to_none=True)
                     micro_since_step = 0
+                    accumulated_targets = 0
                     effective_steps += 1
                     status = "optimized"
-                losses.append(float(loss.item()))
+                losses.append(display_loss)
                 loss_trace.append(
                     {
                         "step": len(loss_trace),
                         "status": status,
                         "active_targets": active_targets,
-                        "loss": float(loss.detach().float().cpu().item()),
+                        "loss": display_loss,
                         "grad_norm": last_grad_norm,
                         "injection_count": (train_runtime or {}).get("injection_count", 0),
                     }
@@ -648,7 +665,16 @@ def main() -> None:
                     }
                 )
             if name.endswith("fs_alpha"):
-                alpha_values[name] = float(param.detach().float().cpu().item())
+                raw_value = float(param.detach().float().cpu().item())
+                effective_gate = None
+                if fs_cfg is not None:
+                    effective_gate = float(
+                        (torch.sigmoid(param.detach().float()) * float(fs_cfg.seed_gate_max_scale)).cpu().item()
+                    )
+                alpha_values[name] = {
+                    "raw_logit": raw_value,
+                    "effective_gate": effective_gate,
+                }
         (output_dir / "fs_alpha.json").write_text(json.dumps(alpha_values, indent=2, sort_keys=True) + "\n")
         (output_dir / "trainable_parameters.json").write_text(
             json.dumps(trainable_parameters, indent=2, sort_keys=True) + "\n"
@@ -672,11 +698,14 @@ def main() -> None:
             "projection_lora_rank": args.projection_lora_rank,
             "projection_lora_alpha": args.projection_lora_alpha,
             "projection_lora_targets": args.projection_lora_targets,
+            "seed_gate_max_scale": args.seed_gate_max_scale,
+            "train_injected_only": bool(args.train_injected_only),
             "optimize_in_eval_mode": bool(args.optimize_in_eval_mode),
             "skip_nonfinite_loss": bool(args.skip_nonfinite_loss),
             "strict_prompt_only": bool(args.strict_prompt_only),
             "grad_clip_norm": args.grad_clip_norm,
             "grad_accum_steps": args.grad_accum_steps,
+            "grad_accum_target_tokens": args.grad_accum_target_tokens,
             "fs_alpha_clamp": args.fs_alpha_clamp,
             "loss_start": losses[0] if losses else None,
             "loss_end": losses[-1] if losses else None,
